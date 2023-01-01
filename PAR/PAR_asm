@@ -1,0 +1,555 @@
+	SECTION	PAR
+
+	INCLUDE	'/INC/QDOS_inc'
+	INCLUDE	'/INC/AMIGA_inc'
+	INCLUDE	'/INC/AMIGQDOS_inc'
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; PAR1_asm - parallel device driver
+;	  - last modified 03/01/97
+
+; These are all the necessary parallel port related sources,
+; required to implement a QDOS parallel device on the Amiga
+; computer.
+
+; Amiga-QDOS sources by Rainer Kowallik
+;  ...latest changes by Mark J Swift
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  device driver definitions
+;  (for the driver's own pseudo system vars)
+
+PV_PEND	EQU	$28	; (long) pending test
+PV_FBYTE EQU	$2C	; (long) fetch byte
+PV_SBYTE EQU	$30	; (long) send byte
+PV_RTS	EQU	$34	; (word) RTS (4E75)
+PV_NOP	EQU	$36	; (word)
+			;  ...(necessary for IO.SERIO)
+
+PV_LLVL7 EQU	$38	; (long) next link
+PV_ALVL7 EQU	$3C	; (long) address
+PV_LRSET EQU	$40	; (long) next link
+PV_ARSET EQU	$44	; (long) address
+
+PV_PARTQ EQU	$48	; (long) address of output queue
+
+PV.LEN	EQU	$4C	; length of PAR device driver defs.
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Channel definition block
+
+PAR_PROT EQU	$18		; EOL Protocol, -ve RAW
+				; 0 CR/LF, 1 CR, 2 LF
+PAR_EOF	EQU	$1A		; EOF (CLOSE) protocol
+				; -ve none, 0 FormFeed
+PAR_TXD	EQU	$1C		; last transmitted character
+PAR_FLGS EQU	$1E		; Bit 0	0 = busy
+				;	1 = ready
+PAR_TXQ	EQU	$20		; Transmit queue header
+PAR.TXQL EQU	81		; Transmit buffer len - odd!
+
+PAR.LEN	EQU	PAR_TXQ+Q_QUEUE+(PAR.TXQL+1)&$FFFE
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  ROM header
+
+BASE:
+	dc.l	$4AFB0001	; ROM recognition code
+	dc.w	0
+	dc.w	ROM_START-BASE
+	dc.b	0,36,'Amiga-QDOS PAR device driver v1.08 ',$A
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  start of ROM code
+
+ROM_START:
+	movem.l	d0-d2/a0-a3,-(a7)
+
+; --------------------------------------------------------------
+;  allocate memory for parallel device variables
+
+	move.l	#PV.LEN,d1
+	moveq	#MT.ALCHP,d0
+	moveq	#0,d2
+	trap	#1
+
+	tst.l	d0
+	bne	ROM_EXIT
+
+; --------------------------------------------------------------
+;  address of PAR variables
+
+	move.l	a0,a3
+
+; --------------------------------------------------------------
+;  enter supervisor mode and disable interrupts
+
+	trap	#0
+
+	ori.w	#$0700,sr	; disable interrupts
+
+; --------------------------------------------------------------
+;  link a custom routine into level 7 interrupt server
+	ifd	dolvl7
+	lea	AV.LVL7link,a1
+	lea	PV_LLVL7(a3),a2
+
+	move.l	(a1),(a2)
+	move.l	a2,(a1)
+
+	lea	MY_LVL7(pc),a1
+	move.l	a1,$04(a2)
+	endif
+; --------------------------------------------------------------
+;  routines necessary for device driver
+
+	lea	PAR_IO(pc),a2	; Input/Output routine
+	move.l	a2,SV_AIO(a3)
+
+	lea	PAR_OPEN(pc),a2	; OPEN routine
+	move.l	a2,SV_AOPEN(a3)
+
+	lea	PAR_CLOSe(pc),a2	; CLOSE routine
+	move.l	a2,SV_ACLOS(a3)
+
+; --------------------------------------------------------------
+;  routines necessary for IO.SERIO. (used by PAR I/O routine)
+
+	lea	ERR_BP(pc),a2	; test for pending input
+	move.l	a2,PV_PEND(a3)	; (not provided)
+
+	lea	ERR_BP(pc),a2	; fetch byte
+	move.l	a2,PV_FBYTE(a3)	; (not provided)
+
+	lea	PAR_SBYT(pc),a2	; send byte
+	move.l	a2,PV_SBYTE(a3)
+
+	move.w	#$4E75,PV_RTS(a3) ; RTS instruction at $34
+
+; --------------------------------------------------------------
+;  set up hardware
+
+	bsr.s	INIT_HW
+
+	clr.l	PV_PARTQ(a3)
+
+; --------------------------------------------------------------
+;  link in device driver
+
+	lea	SV_LIO(a3),a0	; link address
+	moveq	#MT.LIOD,d0	; link in IO device driver
+	trap	#1
+
+; -------------------------------------------------------------
+; link in external interrupt to act on port free
+
+	lea	XINT_SERv(pc),a2	; address of routine
+	move.l	a2,SV_AXINT(a3)
+	lea	SV_LXINT(a3),a0
+	moveq	#MT.LXINT,d0
+	trap	#1
+
+; -------------------------------------------------------------
+; link in poll interrupt to re-enable parallel send
+
+	lea	POLL_SERv(pc),a2	; address of routine
+	move.l	a2,SV_APOLL(a3)
+	lea	SV_LPOLL(a3),a0
+	moveq	#MT.LPOLL,d0
+	trap	#1
+
+; --------------------------------------------------------------
+;  enable interrupts and re-enter user mode
+
+	andi.w	#$D8FF,sr
+
+; --------------------------------------------------------------
+ROM_EXIT:
+	movem.l	(a7)+,d0-d2/a0-a3
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  set up hardware
+
+INIT_HW:
+	movem.l	d7/a3,-(a7)
+
+	move.b	CIAB_DDRA,d7
+	andi.b	#%11111000,d7
+	move.b	d7,CIAB_DDRA	; SEL,POUT,BUSY to inputs
+
+	MOVE.B	#$FF,CIAA_DDRB	; set PRB to all output
+
+	move.b	CIAA_ICR,d7	; read & clear CIA-A ICR
+	or.b	AV.CIAA_ICR,d7
+	bclr	#4,d7		; clear FLAG bit
+	move.b	d7,AV.CIAA_ICR	; store for another program
+
+	move.w	#%0000000000001000,INTREQ ; clear and enable
+	move.w	#%1000000000001000,INTENA ; CIA-A interrupts
+
+	move.b	#%10010000,CIAA_ICR ; enable FLAG interrupt
+
+	ori.b	#%00010000,AV.CIAA_MSK ; take note
+
+	ifd	dolvl7
+	move.l	AV.PARV,a3	; address of PAR variables
+	move.l	PV_PARTQ(a3),d7	; address of transmit Q
+	beq.s	INIT_HWX 	; exit if Q doesn't exist
+
+	move.l	d7,a3
+	bset	#0,1+PAR_FLGS-PAR_TXQ(a3) ; port ready
+
+INIT_HWX:
+	endif
+	movem.l	(a7)+,d7/a3
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Poll interrupt server for parallel port.
+;
+;  Enters: A3 = assumed start of driver definition block
+;	  A6 = system variables
+
+POLL_SERv:
+	bsr	PAR_SEND 	; if port ready, send byte
+
+POLL_X:
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  External interrupt server
+;
+;  Enters: A3 = assumed start of driver definition block
+;	  A6 = system variables
+
+XINT_SERv:
+	movem.l	d7/a0,-(a7)
+
+	move.w	INTENAR,d7	; read interrupt enable reg
+	btst	#3,d7		; branch if ints not on
+	beq	XINT_OTHer
+
+	move.w	INTREQR,d7	; read interrupt request reg
+	btst	#3,d7		; branch if from CIA-A or
+	bne	CIAA_SERv	; expansion ports
+
+; --------------------------------------------------------------
+;  otherwise let another external interrupt server handle it
+
+XINT_OTHer:
+	movem.l	(a7)+,d7/a0
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Interrupt from CIA-A or expansion port
+
+CIAA_SERv:
+	move.b	CIAA_ICR,d7	; read CIA-A ICR
+	or.b	AV.CIAA_ICR,d7
+	move.b	d7,AV.CIAA_ICR	; store for another program
+
+	bclr	#4,d7		; port ready? (FLAG bit=1)
+	beq	XINT_OTHer	; no
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  External interrupt server for acting on par port ready
+;  (CIAA FLAG bit=1).
+
+PAR_RDY:
+	move.b	d7,AV.CIAA_ICR
+
+	and.b	AV.CIAA_MSK,d7	; don't clear INTREQ if
+	bne.s	PAR_RDY0 	; other CIAA ints occured
+
+	move.w	#%0000000000001000,INTREQ ; clear interrupts
+
+; -------------------------------------------------------------
+PAR_RDY0:
+	move.l	PV_PARTQ(a3),d7	; address of transmit Q
+	beq.s	XINT_EXIt	; exit if Q doesn't exist
+
+	move.l	d7,a0
+	bset	#0,1+PAR_FLGS-PAR_TXQ(a0) ; port ready
+
+	bsr	PAR_SEND
+
+; -------------------------------------------------------------
+XINT_EXIt:
+	bra	XINT_OTHer
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  write next byte from queue to parallel port
+
+PAR_SEND:
+	movem.l	d1/d7/a2-a4,-(a7)
+
+	moveq	#ERR.NC,d0	; assume no can do
+
+	move.l	PV_PARTQ(a3),d1	; address of transmit Q
+	beq	PAR_S_X		; exit if Q doesn't exist
+
+	move.l	d1,a2
+	btst	#0,1+PAR_FLGS-PAR_TXQ(a2) ; port ready?
+	beq.s	PAR_S_X
+
+	btst	#0,CIAB_PRA	; printer busy?
+	bne.s	PAR_S_X
+
+	btst	#1,CIAB_PRA	; paper out?
+	bne.s	PAR_S_X
+
+	btst	#2,CIAB_PRA	; printer select?
+	beq.s	PAR_S_X
+
+	moveq	#0,d1
+	move.w	IO.QOUT,a4
+	jsr	(a4)		; get byte d1 from queue a2
+	tst.l	d0
+	bne.s	PAR_S_X		; exit if error
+
+	bclr	#0,1+PAR_FLGS-PAR_TXQ(a2) ; port busy
+
+	move.b	CIAA_ICR,d7	; read CIA-A ICR
+	or.b	AV.CIAA_ICR,d7
+	bclr	#4,d7		; clear FLAG bit
+	move.b	d7,AV.CIAA_ICR	; store for another program
+	move.w	#%0000000000001000,INTREQ ; clear interrupts
+
+	move.b	d1,CIAA_PRB	; write data to par port
+
+PAR_S_X:
+	movem.l	(a7)+,d1/d7/a2-a4
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  OPEN routine for parallel device.
+;
+;  Enters: D3 = open type
+;	  A0 = start of device name
+;	  A3 = assumed start of driver definition block
+;	  A6 = system variables
+
+PAR_OPEN:
+	movem.l	a3,-(a7)
+	suba.w	#4,a7		; room for 2 words on stack
+
+	movea.l	a7,a3		; address for parameters
+	move.w	IO.NAME,a4	; decode device name
+	JSR	(A4)
+
+	BRA.S	PAR_O_X		; not found
+	BRA.S	PAR_O_X		; bad device name
+	BRA.S	PAR_O_CHK	; OK, name was PAR_
+
+	dc.w	3		; length of device name
+	dc.b	'PAR',0		; definition is PAR
+	dc.w	2		; 2 parameters
+
+	dc.w	4		; char value, 4 options
+	dc.b	'RNCL'		; eol protocol
+
+	dc.w	1		; char value, 2 options
+	dc.b	'F',0		; eof protocol
+
+; --------------------------------------------------------------
+PAR_O_X:
+	adda.w	#8,a7
+	ANDI.W	#$F8FF,SR
+	RTS
+
+; --------------------------------------------------------------
+PAR_O_IU:
+	moveq	#ERR.IU,d0	; in use
+	bra	PAR_O_X
+
+; --------------------------------------------------------------
+PAR_O_CHK:
+	move.l	4(a7),a3 	; address of driver def blok
+
+	move.l	PV_PARTQ(a3),d0	; address set?
+	beq.s	PAR_O_CHK1	; no queue, no chan def blk
+
+	movea.l	d0,a0
+	suba.w	#PAR_TXQ,a0	; addrs of old chan def blk
+	bclr	#7,PAR_TXQ(a0)	; output queue empty?
+	bne.s	PAR_O_CHK2	; yes, so continue
+	bra.s	PAR_O_IU 	; no, so exit with error
+
+PAR_O_CHK1:
+	move.w	#(PAR.LEN),d1	; allocate chan def block
+	move.w	MM.ALCHP,a4	; for first time
+	JSR	(A4)
+	bne.s	PAR_O_X		; exit if error occured
+
+	moveq	#PAR.TXQL,d1	; length of transmit queue
+	lea	PAR_TXQ(a0),a2	; address of transmit queue
+	move.w	IO.QSET,a4	; set up queue (not used
+	jsr	(a4)		; before
+
+	move.l	4(a7),a3 	; address of PAR variables
+	move.l	a2,PV_PARTQ(a3)
+
+PAR_O_CHK2:
+	move.w	(a7),PAR_PROT(a0) ; store handshake, protocol
+	move.w	2(a7),PAR_EOF(a0) ; store EOF protocol
+
+	subq.w	#2,PAR_PROT(a0)	; -ve raw : 0 CR/LF : 1 CR : 2 LF
+	subq.w	#1,PAR_EOF(a0)	; -ve none : 0 FF : CTRL-Z
+
+	bset	#0,1+PAR_FLGS(a0) ; set 'port ready' flag
+
+; --------------------------------------------------------------
+PAR_O_OK:
+	moveq	#ERR.OK,d0	; signal "no error"
+	bra	PAR_O_X
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  CLOSE routine for parallel device.
+;
+;  Enters: A0 = start of device name
+;	  A3 = assumed start of driver definition block
+;	  A6 = system variables
+
+PAR_CLOSe:
+	tst.b	1+PAR_EOF(a0)
+	blt.s	PAR_C2		; cont if no eof protocol
+
+	move.w	#12,d1		; send Form Feed
+
+PAR_CLUP:
+	bsr	PAR_SBOK
+	cmp.w	#ERR.NC,d0
+	beq.s	PAR_CLUP
+
+PAR_C2:
+	lea	PAR_TXQ(a0),a2
+	move.w	IO.QEOF,a4	; put EOF marker in queue
+	jsr	(a4)
+
+	moveq	#ERR.OK,d0	; signal "no errors"
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  I/O routine for parallel device.
+;
+;  Enters: A0 = start of device name
+;	  A3 = assumed start of driver definition block
+;	  A6 = system variables
+;	  D0 = operation type
+
+PAR_IO:
+	CMP.B	#$7,D0		; trap file operations
+	BHI	ERR_BP
+
+	pea	PV_PEND(a3)	; pretend call just before
+	move.w	IO.SERIO,a4
+	JMP	(A4)
+
+; --------------------------------------------------------------
+PAR_SBYT:
+	lea	PAR_TXQ(a0),a2
+
+	move.l	d1,d3
+	move.w	IO.QTEST,a4
+	jsr	(a4)
+	move.l	d3,d1
+
+	cmpi.w	#ERR.EF,d0
+	beq.s	PAR_SB4
+
+	moveq	#ERR.OK,d0
+
+	cmpi.w	#$6,d2		; reasonable space in Q?
+	bge.s	PAR_SB5
+
+	moveq	#ERR.NC,d0
+
+PAR_SB4:
+	rts
+
+PAR_SB5:
+	move.b	1+PAR_TXD(a0),d3	; remember old TX code
+	move.b	d1,1+PAR_TXD(a0)	; save new TX code
+
+	tst.b	1+PAR_PROT(a0)
+	blt.s	PAR_SBOK 	; branch if no eol protocol
+
+	cmpi.b	#$0A,d1		; Line Feed?
+	beq.s	PAR_SB1
+
+	cmpi.b	#$0D,d1		; Carriage Return?
+	bne.s	PAR_SBOK 	; branch if neither
+
+PAR_SB1:
+	cmpi.b	#$0A,d3		; Line Feed?
+	beq.s	PAR_SB2
+
+	cmpi.b	#$0D,d3		; Carriage Return?
+	bne.s	PAR_SB3
+
+PAR_SB2:
+	cmp.b	d1,d3
+	beq.s	PAR_SB3
+
+	move.b	#$FF,1+PAR_TXD(a0) ; ignore LF in CR/LF couple
+	moveq	#ERR.OK,d0
+	rts
+
+PAR_SB3:
+	tst.b	1+PAR_PROT(a0)
+	beq.s	PAR_SB6		; branch if CR/LF protocol
+
+	cmp.b	#2,1+PAR_PROT(a0)
+	beq.s	PAR_SB7		; branch if LF
+
+	moveq	#$0D,d1		; else use CR
+	bra.s	PAR_SBOK
+
+PAR_SB6:
+	moveq	#$0D,d1
+	bsr	PAR_SBOK
+
+PAR_SB7:
+	moveq	#$0A,d1
+
+PAR_SBOK:
+	lea	PAR_TXQ(a0),a2
+
+	move.w	IO.QIN,a4	; put byte d1 into queue a2
+	jsr	(a4)
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ERR_OK:
+	moveq	#ERR.OK,d0	; "no error"
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ERR_NC:
+	moveq	#ERR.NC,d0	; "not complete"
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ERR_BP:
+	moveq	#ERR.BP,d0	; "bad parameter"
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Custom LVL7 routine to re-initialise hardware
+	ifd	dolvl7
+MY_LVL7:
+	bsr	INIT_HW
+
+	subq.l	#4,a7
+	movem.l	a3,-(a7)
+	move.l	AV.PARV,a3
+	move.l	PV_LLVL7(a3),a3
+	move.l	4(a3),4(a7)	; address of next routine
+	movem.l	(a7)+,a3
+
+	rts
+	endif
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	END

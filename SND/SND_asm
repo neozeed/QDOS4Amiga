@@ -1,0 +1,633 @@
+	SECTION SND
+
+	INCLUDE '/INC/QDOS_inc'
+	INCLUDE '/INC/AMIGA_inc'
+	INCLUDE '/INC/AMIGQDOS_inc'
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; SND1_asm - sound routines
+;	  - last modified 27/07/94
+
+; These are all the necessary sound related sources, required
+; to implement a QDOS BEEP on the Amiga computer.
+
+;  ...latest changes by Mark J Swift
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  ROM header
+
+BASE:
+	dc.l	$4AFB0001	; ROM recognition code
+	dc.w	0		; add BASIC procs here
+	dc.w	ROM_START-BASE
+	dc.b	0,32,'Amiga-QDOS SOUND routines v1.06',$A
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  start of ROM code
+
+ROM_START:
+	movem.l d0-d3/a0-a3,-(a7)
+
+; --------------------------------------------------------------
+;  allocate memory for sound variables
+
+	move.l	#BV_LEN,d1
+	moveq	#MT.ALCHP,d0
+	moveq	#0,d2
+	trap	#1
+
+; --------------------------------------------------------------
+;  address of sound variables
+
+	move.l	a0,AV.SNDV
+	move.l	a0,a3
+
+; --------------------------------------------------------------
+;  enter supervisor mode and disable interrupts
+
+	trap	#0
+
+	ori.w	#$0700,sr	; disable interrupts
+
+; --------------------------------------------------------------
+;  link a custom routine into level 7 interrupt server
+
+	lea	AV.LVL7link,a1
+	lea	BV.LVL7link(a3),a2
+
+	move.l	(a1),(a2)
+	move.l	a2,(a1)
+
+	lea	MY_LVL7(pc),a1
+	move.l	a1,$04(a2)
+
+; --------------------------------------------------------------
+;  link a custom routine into Trap #1 exception
+
+	lea	AV.TRP1link,a1
+	lea	BV.TRP1link(a3),a2
+
+	move.l	(a1),(a2)
+	move.l	a2,(a1)
+
+	lea	MY_TRP1(pc),a1
+	move.l	a1,$04(a2)
+
+; --------------------------------------------------------------
+;  initialise relevant hardware
+
+	bsr	INIT_HW
+
+; -------------------------------------------------------------
+; link in external interrupt to act on sound cycle complete
+
+	lea	XINT_SERver(pc),a1 ; address of routine
+	lea	BV.XINTLink(a3),a0
+	move.l	a1,4(a0)
+	moveq	#MT.LXINT,d0
+	trap	#1
+
+; --------------------------------------------------------------
+;  enable interrupts and re-enter user mode
+
+	andi.w	#$D8FF,sr
+
+; --------------------------------------------------------------
+;  initiate a sound process
+
+	movem.l	d5/d7,-(a7)
+
+	lea	BLIP(pc),a3
+	moveq	#$11,d0
+	trap	#1
+
+	movem.l	(a7)+,d5/d7
+
+; --------------------------------------------------------------
+ROM_EXIT:
+	movem.l (a7)+,d0-d3/a0-a3
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  initialise sound for use.
+
+INIT_HW:
+	movem.l d0-d2/a0/a3,-(a7)
+
+; --------------------------------------------------------------
+;  initialise hardware
+
+	move.w	#%0000000010000000,INTENA ; disable AUD0 ints
+	move.w	#$000F,DMACONW	        ; kill sound
+	move.w	#%0000000010000000,INTREQ ; clear AUD0 ints
+
+	move.l	a7,d0
+	andi.l	#$FFFF8000,d0
+	move.l	d0,a0		; Calc address of sys vars
+
+	move.b	#0,SV_SOUND(a0)	; signal as not beeping
+
+	movem.l (a7)+,d0-d2/a0/a3
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  external interrupt server
+
+XINT_SERver:
+	movem.l	d7/a0,-(a7)
+
+	move.w	INTENAR,d7	; read interrupt enable reg
+	btst	#7,d7		; branch if AUD0 ints not on
+	beq	XINT_OTHer
+
+	move.w	INTREQR,d7	; read interrupt request reg
+	btst	#7,d7		; branch if from AUD0
+	bne	AUD0_SERV
+
+; --------------------------------------------------------------
+;  otherwise let another external interrupt server handle it
+
+XINT_OTHer:
+	movem.l	(a7)+,d7/a0
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Interrupt from AUD0
+
+AUD0_SERV:
+	move.l	a7,d7
+	andi.l	#$FFFF8000,d7
+	move.l	d7,a0		; Calc address of sys vars
+
+	tst.b	SV_SOUND(a0)	; are we beeping?
+	beq.s	XINT_OTHer	; no.
+
+	move.w	#%0000000010000000,INTREQ ; clear interrupts
+
+	movem.l	d1-d4/a0/a1,-(a7)
+
+	move.l	AV.SNDV,a1
+
+	moveq	#0,d0
+	move.w	BV.BEEP(a1),d0	; previous pitch
+	move.l	d0,d2
+	add.w	#11,d2		; calc. length of sample
+	lsl.l	#4,d2		; scale it
+	add.l	d0,d2
+
+	move.l	BV.DURVAL(a1),d1
+	beq.s	AUD0_L1		; infinite dur.
+
+	add.l	d2,BV.DURCNT(a1)	; increment dur count
+	move.l	BV.DURCNT(a1),d3
+	cmp.l	d3,d1
+	ble	AUD0_DONe	; finished?
+
+AUD0_L1:
+	move.w	BV.NOTE(a1),d0	; calculated pitch
+
+	move.l	BV.GRDVAL(a1),d1
+	beq	AUD0_G3		; no sequence duration
+
+	add.l	d2,BV.GRDCNT(a1)	; increment pitch count
+	move.l	BV.GRDCNT(a1),d2
+	cmp.l	d2,d1
+	bgt	AUD0_G3		; still counting...
+
+	move.w	BV.PITCH(a1),d0	; ideal pitch
+
+AUD0_LUP:
+	tst.w	BV.PITINC(a1)
+	beq	AUD0_G1		; no pitch increment
+
+	add.w	BV.PITINC(a1),d0
+
+	tst.w	BV.PITINC(a1)
+	bmi.s	AUD0_P2
+
+AUD0_P1:
+	move.w	BV.PITCH2(a1),d3
+	cmp.w	d0,d3		; reached limit?
+	bgt.s	AUD0_G1		; no
+
+	move.w	BV.REPCNT(a1),d4
+	dbra	d4,AUD0_R1
+
+	move.w	BV.REPVAL(a1),d4
+	move.w	d4,BV.REPCNT(a1)
+	lsl.w	#1,d3
+	sub.w	d0,d3
+	move.w	d3,d0
+	neg.w	BV.PITINC(a1)	; bounce
+
+	bra.s	AUD0_P2
+
+AUD0_R1:
+	move.w	d4,BV.REPCNT(a1)
+	sub.w	d3,d0
+	add.w	BV.PITCH1(a1),d0	; repeat
+
+	bra.s	AUD0_P1
+
+AUD0_P2:
+	move.w	BV.PITCH1(a1),d3
+	cmp.w	d0,d3		; reached limit?
+	blt.s	AUD0_G1		; no
+
+	move.w	BV.REPCNT(a1),d4
+	dbra	d4,AUD0_R2
+
+	move.w	BV.REPVAL(a1),d4
+	move.w	d4,BV.REPCNT(a1)
+	lsl.w	#1,d3
+	sub.w	d0,d3
+	move.w	d3,d0
+	neg.w	BV.PITINC(a1)	; bounce
+
+	bra.s	AUD0_P1
+
+AUD0_R2:
+	move.w	d4,BV.REPCNT(a1)
+	sub.w	d3,d0
+	add.w	BV.PITCH2(a1),d0	; repeat
+
+	bra.s	AUD0_P2
+
+AUD0_G1:
+	sub.l	d1,d2
+	cmp.l	d2,d1
+	blt.s	AUD0_LUP
+
+	move.l	d2,BV.GRDCNT(a1)
+	move.w	d0,BV.PITCH(a1)
+
+	move.w	BV.RAND(a1),d1
+	beq.s	AUD0_G3
+
+	move.w	BV.SEED(a1),d2
+	addq.w	#1,d2
+	mulu.w	#33,d2
+	divu	#257,d2
+	clr.w	d2
+	swap	d2
+	subq.w	#1,d2
+	andi.w	#$FF,d2
+	move.w	d2,BV.SEED(a1)	; make a random number
+
+	addq.w	#1,d1
+	divu	d1,d2
+	swap	d2
+	lsr.w	#1,d1
+	sub.w	d2,d1
+	add.w	d1,d0		; RANDomise note
+	andi.w	#$00FF,d0
+
+AUD0_G3:
+	bsr	SETBEEP		; new sound params
+
+	bra.s	AUD0_EXIt
+
+AUD0_DONe:
+	bsr	INIT_HW
+
+AUD0_EXIt:
+	movem.l	(a7)+,d1-d4/a0/a1
+
+XINT_EXIt:
+	bra	XINT_OTHer
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SETBEEP:
+	move.w	d0,BV.NOTE(a1)
+
+	move.w	BV.FUZZ(a1),d1
+	beq.s	SETBEEP1
+
+	move.w	BV.SEED(a1),d2
+	addq.w	#1,d2
+	mulu.w	#33,d2
+	divu	#257,d2
+	clr.w	d2
+	swap	d2
+	subq.w	#1,d2
+	andi.w	#$FF,d2
+	move.w	d2,BV.SEED(a1)	; make a random number
+
+	addq.w	#1,d1
+	divu	d1,d2
+	swap	d2
+	lsl.w	#2,d2
+	add.w	d2,d0
+	andi.w	#$00FF,d0
+
+SETBEEP1:
+	move.w	d0,BV.BEEP(a1)
+
+	move.w	d0,d1
+	addi.w	#11,d1		; calc. length of sample
+
+	move.w	d1,d0
+	lsr.w	#1,d0		; calc. AUDXLEN
+	move.w	d0,AUD0LEN
+
+	lea	SAMPLE,a0
+	lea	140(a0),a0	; half way thro' sample
+	move.l	a0,d2
+	ext.l	d0
+	sub.l	d0,d2
+	bclr	#0,d2		; calc. AUDXLC
+	move.l	d2,AUD0LC
+
+	move.w	#313,d0		; AUDXPER
+
+	bclr	#0,d1		; need to adjust AUDXPER?
+	beq.s	SETBEEP2 	; no.
+
+	move.w	d0,d2
+	ext.l	d2
+	divu	d1,d2
+	add.w	d2,d0		; calc. new AUDXPER
+
+SETBEEP2:
+	move.w	d0,AUD0PER
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Custom LVL7 routine to initialise hardware
+
+MY_LVL7:
+	bsr	INIT_HW
+
+	subq.l	#4,a7
+	movem.l	a3,-(a7)
+	move.l	AV.SNDV,a3
+	move.l	BV.LVL7link(a3),a3
+	move.l	4(a3),4(a7)	; address of next routine
+	movem.l	(a7)+,a3
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  A patch to replace TRAP#1 calls to: MT_IPCOM (d0=$10 and $11)
+
+MY_TRP1:
+	bsr	INI_A5A6
+
+	cmp.b	#$11,d0
+	beq	MT_IPCOM
+
+MY_TRP1X:
+	movem.l (a7)+,d7/a5/a6	; restore registers
+
+	subq.l	#4,a7
+	movem.l	a3,-(a7)
+	move.l	AV.SNDV,a3
+	move.l	BV.TRP1link(a3),a3
+	move.l	4(a3),4(a7)	; address of next routine
+	movem.l	(a7)+,a3
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; initialise A5 and A6 prior to performing a TRAP routine
+
+INI_A5A6
+	SUBQ.L	#8,A7
+	MOVE.L	8(A7),-(A7)
+	MOVEM.L D7/A5/A6,4(A7)
+
+	move.l	a7,d7
+	andi.l	#$FFFF8000,d7
+	move.l	d7,a6		; Calc address of sys vars
+
+	LEA	4(A7),A5 ; A5 points to saved
+				; Registers D7,A5,A6
+	MOVEQ	#$7F,D7
+	AND.L	D7,D0
+	RTS
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  TRAP #1 with D0=$11
+
+MT_IPCOM:
+	cmp.b	#10,(a3) ; is IPC command initiate sound ?
+	beq.s	MT_IPC10
+
+	cmp.b	#11,(a3) 	; is it kill sound ?
+	bne	MY_TRP1X 	; no
+
+MT_IPC11:
+	bsr	INIT_HW
+
+	moveq	#0,d0
+	bra	TRAP1_X		; exit
+
+MT_IPC10:
+	movem.l	d1-d2/a0-a2,-(a7)
+
+	move.l	AV.SNDV,a1
+
+	move.l	a3,a2
+
+	cmp.b	#8,1(a3)
+	beq.s	IPC_SKP0
+
+; --------------------------------------------------------------
+; change 16 parameter sound into an 8 parameter one
+
+	lea	SAMPLE,a2
+
+	move.b	$6(a3),$6(a2)
+	move.b	$8(a3),$7(a2)
+	move.w	$A(a3),$8(a2)
+	move.w	$C(a3),$A(a2)
+	move.b	$E(a3),d0
+	lsl.b	#4,d0
+	move.b	$10(a3),d1
+	andi.b	#$F,d1
+	or.b	d1,d0
+	move.b	d0,$C(a2)
+	move.b	$12(a3),d0
+	lsl.b	#4,d0
+	move.b	$14(a3),d1
+	andi.b	#$F,d1
+	or.b	d1,d0
+	move.b	d0,$D(a2)
+
+; --------------------------------------------------------------
+IPC_SKP0:
+	moveq	#0,d1
+	move.b	$6(a2),d1
+	sub.b	#1,d1		; get PITCH1
+
+	moveq	#0,d2
+	move.b	$7(a2),d2
+	sub.b	#1,d2		; get PITCH2
+
+	cmp.w	d1,d2
+	bge.s	IPC_SKP1
+
+	exg	d1,d2
+
+IPC_SKP1:
+	move.w	d1,BV.PITCH1(a1)
+	move.w	d2,BV.PITCH2(a1)
+
+; --------------------------------------------------------------
+	move.b	$9(a2),d0	; gradient hi
+	lsl.w	#8,d0
+	move.b	$8(a2),d0	; gradient lo
+	mulu	#14,d0
+	move.l	d0,BV.GRDVAL(a1)
+
+; --------------------------------------------------------------
+	move.b	$B(a2),d0	; duration hi
+	lsl.w	#8,d0
+	move.b	$A(a2),d0	; duration lo
+	mulu	#14,d0
+	move.l	d0,BV.DURVAL(a1)
+
+; --------------------------------------------------------------
+	moveq	#0,d0
+	move.b	$C(a2),d0	; repeats
+	andi.b	#$0F,d0
+	move.w	d0,BV.REPVAL(a1)
+
+	move.w	d0,BV.REPCNT(a1)
+
+; --------------------------------------------------------------
+	move.b	$C(a2),d0	; get pitch increment
+	lsr.b	#4,d0
+	cmpi.b	#8,d0
+	bne.s	IPC_SKP5
+
+	move.w	d1,d0
+	sub.w	d2,d0		; maximise pitch inc
+	bra.s	IPC_SKP2
+
+IPC_SKP5:
+	lsl.b	#4,d0
+	ext.w	d0
+	asr.w	#4,d0		; sign extend
+
+	tst.w	d0
+	bgt.s	IPC_SWP3
+
+IPC_SKP2:
+	move.w	d2,BV.PITCH(a1)	; current ideal value
+	bra.s	IPC_SWP4
+
+IPC_SWP3:
+	move.w	d1,BV.PITCH(a1)	; current ideal value
+
+; --------------------------------------------------------------
+IPC_SWP4:
+	cmp.w	d1,d2
+	bne.s	IPC_SWP5
+
+	moveq	#0,d0
+
+IPC_SWP5:
+	move.w	d0,BV.PITINC(a1)
+
+; --------------------------------------------------------------
+	moveq	#0,d0
+	move.b	$D(a2),d0	; fuzz
+	andi.b	#$F,d0
+	subq.w	#$7,d0		; make 0-8
+	bge.s	IPC_SKP3
+
+	clr.w	d0
+
+IPC_SKP3:
+	move.w	d0,BV.FUZZ(a1)
+
+; --------------------------------------------------------------
+	moveq	#0,d0
+	move.b	$D(a2),d0	; randomness
+	lsr.b	#4,d0
+	subq.w	#$7,d0		; make 0-8
+	bge.s	IPC_SKP4
+
+	clr.w	d0
+
+IPC_SKP4:
+	move.w	d0,BV.RAND(a1)
+
+	clr.l	BV.DURCNT(a1)
+	clr.l	BV.GRDCNT(a1)
+	clr.w	BV.SEED(a1)
+
+; --------------------------------------------------------------
+	lea	SAMPLE,a0
+	lea	BEEPBEG(pc),a2
+	move.w	#((BEEPEND-BEEPBEG)/2-1),d0
+
+MOVSNDLUP:
+	move.w	(a2)+,(a0)+
+	dbra	d0,MOVSNDLUP
+
+; --------------------------------------------------------------
+	move.l	a7,d0
+	andi.l	#$FFFF8000,d0
+	move.l	d0,a0		; Calc address of sys vars
+
+	move.b	#$FF,SV_SOUND(a0) ; signal as beeping
+
+; --------------------------------------------------------------
+	move.w	#64,AUD0VOL	; set volume
+	move.w	#$FF,ADKCON	; no modulation
+
+	move.w	BV.PITCH(a1),d0
+	bsr	SETBEEP
+
+; --------------------------------------------------------------
+	move.w	#%0000000010000000,INTREQ ; clear interrupts
+	move.w	#$8001,DMACONW	        ; start sound
+	move.w	#%1000000010000000,INTENA ; enable interrupts
+
+	movem.l	(a7)+,d1-d2/a0-a2
+	moveq	#0,d0
+	bra	TRAP1_X	; exit
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  exit from TRAP call
+
+TRAP1_X	movem.l (a7)+,d7/a5/a6	 ; exit from exception
+	rte
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  BEEP sound sample, a square wave with rippled edges.
+
+BEEPBEG:
+	DC.B $8D,$8B,$88,$86,$84,$83,$82,$81,$82,$83,$84,$86,$88,$8B,$8D,$8F
+	DC.B $90,$91,$91,$91,$90,$8F,$8D,$8B,$88,$86,$84,$83,$82,$81,$82,$83
+	DC.B $84,$86,$88,$8B,$8D,$8F,$90,$91,$91,$91,$90,$8F,$8D,$8B,$88,$86
+	DC.B $84,$83,$82,$81,$82,$83,$84,$86,$88,$8B,$8D,$8F,$90,$91,$91,$91
+	DC.B $90,$8F,$8D,$8B,$88,$86,$84,$83,$82,$81,$82,$83,$84,$86,$88,$8B
+	DC.B $8D,$8F,$90,$91,$91,$91,$90,$8F,$8D,$8B,$88,$86,$84,$83,$82,$81
+	DC.B $82,$83,$84,$86,$88,$8B,$8D,$8F,$90,$91,$91,$91,$90,$8F,$8D,$8B
+	DC.B $88,$86,$84,$83,$82,$81,$82,$83,$84,$86,$88,$8B,$8D,$8F,$90,$91
+	DC.B $91,$91,$90,$8F,$8D,$8B,$88,$86,$84,$83,$82,$81,$7F,$7E,$7D,$7C
+	DC.B $7A,$78,$75,$73,$71,$70,$6F,$6F,$6F,$70,$71,$73,$75,$78,$7A,$7C
+	DC.B $7D,$7E,$7F,$7E,$7D,$7C,$7A,$78,$75,$73,$71,$70,$6F,$6F,$6F,$70
+	DC.B $71,$73,$75,$78,$7A,$7C,$7D,$7E,$7F,$7E,$7D,$7C,$7A,$78,$75,$73
+	DC.B $71,$70,$6F,$6F,$6F,$70,$71,$73,$75,$78,$7A,$7C,$7D,$7E,$7F,$7E
+	DC.B $7D,$7C,$7A,$78,$75,$73,$71,$70,$6F,$6F,$6F,$70,$71,$73,$75,$78
+	DC.B $7A,$7C,$7D,$7E,$7F,$7E,$7D,$7C,$7A,$78,$75,$73,$71,$70,$6F,$6F
+	DC.B $6F,$70,$71,$73,$75,$78,$7A,$7C,$7D,$7E,$7F,$7E,$7D,$7C,$7A,$78
+	DC.B $75,$73,$71,$70,$6F,$6F,$6F,$70,$71,$73,$75,$78,$7A,$7C,$7D,$7E
+	DC.B $7F,$7E,$7D,$7C,$7A,$78,$75,$73
+
+BEEPEND:
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  IPC10 BEEP sound process... a short blip
+
+BLIP:
+	DC.B $0A,$08,$AA,$AA,$55,$55
+	DC.B $01,$01,$00,$00,$00,$04,$00,$00
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	END

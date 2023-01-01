@@ -1,0 +1,891 @@
+	SECTION	SER
+
+	INCLUDE	'/INC/QDOS_inc'
+	INCLUDE	'/INC/AMIGA_inc'
+	INCLUDE	'/INC/AMIGQDOS_inc'
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; SER1_asm - serial device driver
+;	  - last modified 03/11/97
+
+; These are all the necessary serial port related sources,
+; required to implement a QDOS serial device on the Amiga
+; computer.
+
+; Amiga-QDOS sources by Rainer Kowallik
+;  ...latest changes by Mark J Swift
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Define some constants.
+
+B_4800	EQU	745
+B_9600	EQU	372
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Define some extra serial variables
+
+SER_EOF	EQU	SER_END		; EOF (CLOSE) protocol
+SER_TXD	EQU	SER_EOF+2	; last transmitted character
+SER_RXD	EQU	SER_TXD+2	; last received character
+SER_MORE EQU	SER_RXD+2-SER_EOF ; length of extra ser vars
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  ROM header
+
+BASE:
+	dc.l	$4AFB0001	; ROM recognition code
+	dc.w	0
+	dc.w	ROM_START-BASE
+	dc.b	0,36,'Amiga-QDOS SER device driver v1.09 ',$A
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  start of ROM code
+
+ROM_START:
+	movem.l	d0-d2/a0-a3,-(a7)
+
+; --------------------------------------------------------------
+;  allocate memory for variables
+
+	move.l	#SV_LEN,d1
+	moveq	#MT.ALCHP,d0
+	moveq	#0,d2
+	trap	#1
+
+	tst.l	d0
+	bne	ROM_EXIT
+
+; --------------------------------------------------------------
+;  address of SER variables
+
+	move.l	a0,AV.SERV
+	move.l	a0,a3		; address of linkage block
+
+; --------------------------------------------------------------
+;  enter supervisor mode and disable interrupts
+
+	trap	#0
+
+	ori.w	#$0700,sr	; disable interrupts
+
+; --------------------------------------------------------------
+;  link a custom routine into level 7 interrupt server
+
+	lea	AV.LVL7link,a1
+	lea	SV.LVL7link(a3),a2
+
+	move.l	(a1),(a2)
+	move.l	a2,(a1)
+
+	lea	MY_LVL7(pc),a1
+	move.l	a1,$04(a2)
+
+; --------------------------------------------------------------
+;  link a custom routine into Trap #1 exception
+
+	lea	AV.TRP1link,a1
+	lea	SV.TRP1link(a3),a2
+
+	move.l	(a1),(a2)
+	move.l	a2,(a1)
+
+	lea	MY_TRP1(pc),a1
+	move.l	a1,$04(a2)
+
+; --------------------------------------------------------------
+;  routines necessary for device driver
+
+	lea	SER_IO(pc),a2	; Input/Output routine
+	move.l	a2,SV_AIO(a3)
+
+	lea	SER_OPEN(pc),a2	; OPEN routine
+	move.l	a2,SV_AOPEN(a3)
+
+	lea	SER_CLOSe(pc),a2	; CLOSE routine
+	move.l	a2,SV_ACLOS(a3)
+
+; --------------------------------------------------------------
+;  routines necessary for IO.SERIO. (used by SER I/O routine)
+
+	lea	SER_TST(pc),a2	; test for pending input
+	move.l	a2,SV.PEND(a3)
+
+	lea	SER_FBYT(pc),a2	; fetch byte
+	move.l	a2,SV.FBYTE(a3)
+
+	lea	SER_SBYT(pc),a2	; send byte
+	move.l	a2,SV.SBYTE(a3)
+
+	move.w	#$4E75,SV.RTS(A3) ; RTS instruction at $34
+
+; --------------------------------------------------------------
+;  set up hardware
+
+	bsr.s	INIT_HW
+
+; --------------------------------------------------------------
+;  link in device driver
+
+	lea	SV_LIO(a3),a0	; link address
+	moveq	#MT.LIOD,d0	; link in IO device driver
+	trap	#1
+
+; -------------------------------------------------------------
+; link in external interrupt to act on port free
+
+	lea	XINT_SERv(pc),a2	; address of routine
+	move.l	a2,SV_AXINT(a3)
+	lea	SV_LXINT(a3),a0
+	moveq	#MT.LXINT,d0
+	trap	#1
+
+; -------------------------------------------------------------
+; link in poll interrupt to re-enable serial send / receive
+
+	lea	POLL_SERv(pc),a2	; address of routine
+	move.l	a2,SV_APOLL(a3)
+	lea	SV_LPOLL(a3),a0
+	moveq	#MT.LPOLL,d0
+	trap	#1
+
+; --------------------------------------------------------------
+;  enable interrupts and re-enter user mode
+
+	andi.w	#$D8FF,sr
+
+; --------------------------------------------------------------
+ROM_EXIT:
+	movem.l	(a7)+,d0-d2/a0-a3
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  set up hardware
+
+INIT_HW:
+	move.l	d7,-(a7)
+
+	move.b	CIAB_DDRA,d7
+	andi.b	#%00000111,d7
+	ori.b	#%11000000,d7	; DTR(7),RTS(6) as outputs &
+	move.b	d7,CIAB_DDRA	; CD(5),CTS(4),DSR(3) inputs
+
+	MOVE.B	#%11000000,CIAB_PRA ; DTR(7) low (1) not ready to receive
+				  ; RTS(6) low (1) nothing to send
+
+	MOVE.W	#B_9600,D0
+	BSET	#15,D0		; 9 bit receive data
+	MOVE.W	D0,SERPER	; Set baudrate
+
+	move.w	#%0000100000000001,INTREQ ; clear interrupts
+	move.w	#%1000100000000001,INTENA ; enable RBF & TBE
+				        ; interrupts
+	move.l	(a7)+,d7
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Serial open routine
+
+SER_OPEN:
+	suba.w	#10,a7		; room for 5 words on
+	MOVEA.L	A7,A3		; stack.
+
+	move.w	IO.NAME,a4	; decode device name
+	jsr	(a4)
+
+	BRA.S	SER_O_X		; error
+	BRA.S	SER_O_X		; error
+	BRA.S	SER_O_CHK	; OK, check values
+
+	DC.B	0,3,'SER',0
+	dc.w	5		; 5 parameters
+
+	dc.w	-1		; word, no seperator
+	dc.w	1		; default port
+
+	dc.w	4		; char value, 4 options
+	DC.B	'OEMS'		; Parity
+
+	DC.W	2		; char value, 2 options
+	DC.B	'IH'		; handshake
+
+	dc.w	4		; char value, 4 options
+	dc.b	'RNCL'		; eol protocol
+
+	dc.w	2		; char value, 2 options
+	dc.b	'FZ'		; eof protocol
+
+; --------------------------------------------------------------
+SER_O_NF:
+	moveq	#ERR.NF,d0	; not found
+	bra	SER_O_X
+
+; --------------------------------------------------------------
+SER_O_IU:
+	moveq	#ERR.IU,d0	; in use
+
+; --------------------------------------------------------------
+SER_O_X:
+	adda.w	#10,a7
+	ANDI.W	#$F8FF,SR
+	RTS
+
+; --------------------------------------------------------------
+SER_O_CHK:
+	ORI.W	#$0700,SR	; disable interrupts
+
+	MOVE.W	(A7),D4		; get port
+	ble.s	SER_O_NF 	; <=0, bad value
+
+	SUBQ.W	#2,D4
+	bgt.s	SER_O_NF 	; >2, bad value
+
+	lea	SV_SER1C(a6),a5	; Receive queue, channel 1
+	move.l	(a5),d0		; address set?
+	BEQ.S	L00B56		; no queue, no chan def blk
+
+	movea.l	d0,a0
+	suba.w	#SER_RXQ,a0	; addrs of old chan def blk
+	bclr	#7,SER_TXQ(a0)	; output queue empty?
+	BNE.S	L00B6A		; yes, so continue
+	bra.s	SER_O_IU 	; no, so exit with error
+
+L00B56:
+	move.w	#(SER_END+SER_MORE),d1 ; allocate chan def block
+	move.w	MM.ALCHP,a4	; for first time
+	JSR	(A4)
+	bne.s	SER_O_X		; exit if error occured
+
+	moveq	#SER_TXQL,d1	; length of transmit queue
+	lea	SER_TXQ(a0),a2	; address of transmit queue
+	move.w	IO.QSET,a4	; set up queue (not used
+	jsr	(a4)		; before
+
+L00B6A:
+	moveq	#SER_RXQL,d1	; length of receive queue
+	lea	SER_RXQ(a0),a2	; address of receive queue
+	move.w	IO.QSET,a4	; set up queue
+	jsr	(a4)
+
+	move.l	a2,SV_SER1C(a6)	; Receive queue, channel 1
+
+	move.l	(a7),SER_CHNO(a0) ; store port number, parity
+	move.l	4(a7),SER_TXHS(a0) ; store handshake, protocol
+	move.w	8(a7),SER_EOF(a0) ; store EOF protocol
+
+	subq.w	#1,SER_TXHS(a0)	; <=0 ignore, 1 handshake
+	subq.w	#2,SER_PROT(a0)	; <0 raw : 0 CR/LF : 1 CR : 2 LF
+	subq.w	#1,SER_EOF(a0)	; <0 none : 0 FF : CTRL-Z
+
+; --------------------------------------------------------------
+;  set up hardware
+
+	move.b	#%01000000,CIAB_PRA ; DTR(7) high (0) ready to receive
+				  ; RTS(6) low (1) nothing to send
+
+; --------------------------------------------------------------
+SER_O_OK:
+	moveq	#ERR.OK,d0	; signal "no error"
+	bra	SER_O_X
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  serial close routine
+
+SER_CLOSe:
+	tst.b	1+SER_EOF(a0)
+	blt.s	SER_C2		; cont if no eof protocol
+
+	beq.s	SER_C1		; branch if FF protocol
+
+	move.w	#26,d1		; else send CTRL-Z
+	bra.s	SER_CLUP
+
+SER_C1:
+	move.w	#12,d1		; send Form Feed
+
+SER_CLUP:
+	bsr	SER_SBOK
+	cmp.w	#ERR.NC,d0
+	beq.s	SER_CLUP
+
+SER_C2:
+	MOVE.B	#%11000000,CIAB_PRA ; DTR(7) low (1) not ready to receive
+				  ; RTS(6) low (1) nothing to send
+
+	lea	SER_TXQ(a0),a2
+	move.w	IO.QEOF,a4	; put EOF marker in queue
+	jsr	(a4)
+
+	moveq	#ERR.OK,d0	; signal "no errors"
+	RTS
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Serial - input / output routine
+
+SER_IO:
+	pea	SV.PEND(a3)	; pretend call just before
+	move.w	IO.SERIO,a4
+	JMP	(A4)
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Serial - test for pending input
+
+SER_TST:
+	lea	SER_RXQ(a0),a2   ; pointer to buffer
+	move.w	IO.QTEST,a4
+	jmp	(a4)
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Serial - Send byte d1
+
+SER_SBYT:
+	lea	SER_TXQ(a0),a2
+
+	move.l	d1,d3
+	move.w	IO.QTEST,a4
+	jsr	(a4)
+	move.l	d3,d1
+
+	cmpi.w	#ERR.EF,d0
+	beq.s	SER_SB4
+
+	moveq	#ERR.OK,d0
+
+	cmpi.w	#$6,d2
+	bge.s	SER_SB5
+
+	moveq	#ERR.NC,d0
+
+SER_SB4:
+	rts
+
+SER_SB5:
+	move.b	1+SER_TXD(a0),d3	; remember old TX code
+	move.b	d1,1+SER_TXD(a0)	; save new TX code
+
+	tst.b	1+SER_PROT(a0)
+	blt.s	SER_SBOK 	; branch if no eol protocol
+
+	cmpi.b	#$0A,d1		; Line Feed?
+	beq.s	SER_SB1
+
+	cmpi.b	#$0D,d1		; Carriage Return?
+	bne.s	SER_SBOK 	; branch if neither
+
+SER_SB1:
+	cmpi.b	#$0A,d3		; Line Feed?
+	beq.s	SER_SB2
+
+	cmpi.b	#$0D,d3		; Carriage Return?
+	bne.s	SER_SB3
+
+SER_SB2:
+	cmp.b	d1,d3
+	beq.s	SER_SB3
+
+	move.b	#$FF,1+SER_TXD(a0) ; ignore LF in CR/LF couple
+	moveq	#ERR.OK,d0
+	rts
+
+SER_SB3:
+	tst.b	1+SER_PROT(a0)
+	beq.s	SER_SB6		; branch if CR/LF protocol
+
+	cmp.b	#2,1+SER_PROT(a0)
+	beq.s	SER_SB7		; branch if LF
+
+	moveq	#$0D,d1		; else use CR
+	bra.s	SER_SBOK
+
+SER_SB6:
+	moveq	#$0D,d1
+	bsr	SER_SBOK
+
+SER_SB7:
+	moveq	#$0A,d1
+
+SER_SBOK:
+	tst.b	SV_TRAN(a6)	; key translation present ?
+	beq.s	L00BDE		; if not -> L00BDE
+
+SER_SBOK1:
+	BSR	TRAKEY_S
+
+	rts
+
+L00BDE:
+	move.w	SER_PAR(a0),d0
+	MOVE.B	L00BEA(PC,D0.W),D0
+	JMP	L00BEA(PC,D0.W)
+L00BEA:
+	DC.B	WNOPAR-L00BEA
+	DC.B	WODD-L00BEA
+	DC.B	WEVEN-L00BEA
+	DC.B	WBIT7-L00BEA
+	DC.B	WBIT8-L00BEA
+	DC.B	0
+
+; --------------------------------------------------------------
+WBIT7:
+	BSET	#7,D1
+
+; --------------------------------------------------------------
+WNOPAR:
+	lea	SER_TXQ(a0),a2
+
+	move.w	IO.QIN,a4	; put byte d1 into queue a2
+	jsr	(a4)
+	BRA	L00C74
+
+; --------------------------------------------------------------
+WBIT8:
+	BCLR	#7,D1
+	BRA.S	WNOPAR
+
+; --------------------------------------------------------------
+WODD:
+	BSR	L00C76
+	BCHG	#7,D1
+	BRA.S	WNOPAR
+
+; --------------------------------------------------------------
+WEVEN:
+	BSR	L00C76
+	BRA.S	WNOPAR
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Serial - fetch byte
+
+SER_FBYT:
+	move.l	SV_SER1C(a6),a2	      ; Pointer to buffer
+
+	move.w	IO.QOUT,a4
+	jsr	(a4)
+
+	BNE	L00C74
+
+SER_RDAT:
+	MOVE.W	$1A(A0),D3
+	MOVE.B	L00C3A(PC,D3.W),D3
+	JMP	L00C3A(PC,D3.W)
+
+L00C3A:
+	DC.B	RNOPAR-L00C3A
+	DC.B	RIMPAR-L00C3A
+	DC.B	RPAR-L00C3A
+	DC.B	RBIT71-L00C3A
+	DC.B	RBIT70-L00C3A
+	DC.B	0
+
+; --------------------------------------------------------------
+RBIT71:
+	BCHG	#7,D1
+	BRA.S	RBIT70
+
+; --------------------------------------------------------------
+RIMPAR:
+	BCHG	#7,D1
+
+; --------------------------------------------------------------
+RPAR:
+	BSR.S	L00C76
+
+; --------------------------------------------------------------
+RBIT70:
+	BTST	#7,D1
+	BEQ.S	RNOPAR
+	MOVEQ	#-13,D0		; XMIT error
+
+; --------------------------------------------------------------
+RNOPAR:
+	tst.b	SV_TRAN(a6)	; Key translation present ?
+	BEQ.S	L00C66
+	BSR	TRAKEY_R
+
+L00C66:
+	move.b	1+SER_RXD(a0),d3	; remember old RX code
+	move.b	d1,1+SER_RXD(a0)	; save new RX code
+
+	tst.b	1+SER_PROT(a0)
+	blt.s	L00C74		; branch if no EOL protocol
+
+	cmpi.b	#$0A,d1		; Line Feed?
+	beq.s	RNOP1
+
+	cmpi.b	#$0D,d1		; Carriage Return?
+	bne.s	L00C74		; branch if neither
+
+RNOP1:
+	cmpi.b	#$0A,d3		; Line Feed?
+	beq.s	RNOP2
+
+	cmpi.b	#$0D,d3		; Carriage Return?
+	bne.s	RNOP3
+
+RNOP2:
+	cmp.b	d1,d3
+	beq.s	RNOP3
+
+	move.b	#$FF,1+SER_RXD(a0) ; ignore LF in CR/LF couple
+	moveq	#ERR.NC,d0
+	rts
+
+RNOP3:
+	moveq	#$0A,d1		; change to LF
+
+L00C74:
+	RTS
+
+; --------------------------------------------------------------
+L00C76:
+	MOVEQ	#6,D3
+	MOVE.B	D1,D4
+
+L00C7A:
+	ROR.B	#1,D1
+	EOR.B	D1,D4
+	DBF	D3,L00C7A
+	ROXL.B	#1,D4
+	ROXR.B	#1,D1
+	RTS
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Translate key d1 for sending
+
+TRAKEY_S:
+	MOVEM.L	D1-D3/A1,-(A7)
+	MOVEQ	#0,D0
+	movea.l	SV_TRTAB(a6),a1	; Pointer to key translation
+	MOVE.W	2(A1),D2
+	LEA	0(A1,D2.W),A1
+	TST.B	D1
+	BEQ.S	L0B5D6
+	MOVE.B	0(A1,D1.W),D0
+	TST.B	D0
+	BEQ.S	L0B58E
+	MOVE.B	D0,D1
+	BRA.S	L0B5D6
+
+L0B58E:
+	MOVE.L	D1,D3
+
+	move.w	IO.QTEST,a4
+	jsr	(a4)
+
+	MOVE.L	D3,D1
+	CMPI.W	#$FFF6,D0
+	BEQ.S	L0B5DC
+	MOVEQ	#0,D0
+	CMPI.W	#$0003,D2
+	BGE.S	L0B5AA
+	MOVEQ	#-1,D0
+	BRA.S	L0B5DC
+
+L0B5AA:
+	MOVEA.L	SV_TRTAB(A6),A1	; pointer to key translation
+	MOVE.W	4(A1),D2 	; Start of system messages
+	LEA	0(A1,D2.W),A1
+	MOVE.B	(A1)+,D3
+
+L0B5B8:
+	BEQ.S	L0B5DC
+	CMP.B	(A1)+,D1
+	BEQ.S	L0B5C4
+	ADDQ.L	#3,A1
+	SUBQ.B	#1,D3
+	BRA.S	L0B5B8
+
+L0B5C4:
+	MOVE.B	(A1)+,D1
+	bsr	L00BDE		; put byte d1 into queue a2
+	MOVE.B	(A1)+,D1
+	bsr	L00BDE		; put byte d1 into queue a2
+	MOVE.B	(A1),D1
+
+L0B5D6:
+	bsr	L00BDE		; put byte d1 into queue a2
+
+L0B5DC:
+	MOVEM.L	(A7)+,D1-D3/A1
+	RTS
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  translate key d1 for reading
+
+TRAKEY_R:
+	MOVEM.L	D0/D2/A1,-(A7)	; D0-D2/A1 as before can not
+				; work correctly
+	MOVEA.L	$146(A6),A1	; pointer to key translation
+	MOVE.W	2(A1),D2
+	LEA	0(A1,D2.W),A1
+	MOVE.B	0(A1,D1.W),D0
+	TST.B	D0
+	BEQ.S	L0B60E
+	MOVE.W	D1,D2
+
+L0B5FC:
+	MOVE.B	0(A1,D2.W),D0
+	CMP.B	D0,D1
+	BEQ.S	L0B60C
+	ADDQ.B	#1,D2
+	CMP.B	D2,D1
+	BNE.S	L0B5FC
+	BRA.S	L0B60E
+
+L0B60C:
+	MOVE.B	D2,D1
+
+L0B60E:
+	MOVEM.L	(A7)+,D0/D2/A1	; D0-D2/A1 as before can not
+				; work correctly
+	RTS
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  poll interrupt server for serial port. If interrupts are off,
+;  restarts interrupts by sending a byte.
+
+POLL_SERv:
+	bsr	SER_SEND 	; if transmit buffer is
+				; empty, and CTS bit is
+				; clear, then send a byte
+
+	bsr	SER_RECV 	; if there's room in input
+				; buffer, fetch byte.
+POLL_X:
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  external interrupt server for serial port
+
+XINT_SERv:
+	movem.l	d7/a0,-(a7)
+
+	move.w	INTENAR,d7	; read interrupt enable reg
+	btst	#0,d7		; branch if ints not on
+	beq	XINT_1
+
+	move.w	INTREQR,d7	; read interrupt request reg
+	btst	#0,d7		; branch if from output
+	bne	TBE_XINT 	; buffer empty
+	bra	XINT_OTHer
+
+XINT_1:
+	btst	#11,d7		; branch if ints not on
+	beq	XINT_OTHer
+
+	move.w	INTREQR,d7	; read interrupt request reg
+	btst	#11,d7		; branch if from input
+	bne	RBF_XINT 	; buffer full
+
+; --------------------------------------------------------------
+;  otherwise let another external interrupt server handle it
+
+XINT_OTHer:
+	movem.l	(a7)+,d7/a0
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  RBF Interrupt. Reads a byte into the queue when serial data
+;  is ready (read buffer is full).
+
+RBF_XINT:
+	bsr	SER_RECV 	; send next byte
+
+	move.w	#%0000100000000000,INTREQ ; reset RBF int.
+
+RBF_XINT_X:
+	bra.s	XINT_EXIt
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  TBE Interrupt. Tries to send another byte from queue when
+;  transmit buffer becomes empty.
+
+TBE_XINT:
+	move.w	#%0000000000000001,INTREQ ; reset TBE int.
+
+	bsr	SER_SEND 	; send next byte
+
+TBE_XINT_X:
+
+; -------------------------------------------------------------
+XINT_EXIt:
+	bra.s	XINT_OTHer
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SER_RECV:
+	movem.l	d0-d3/a0-a4,-(a7)
+
+	MOVE.L	SV_SER1C(a6),a2	; Receive queue channel 1
+	MOVE.L	A2,D0		; channel open ?
+	BEQ.S	SER_RECVX	; no, ignore data.
+
+	move.b	1+SER_TXHS-SER_RXQ(a2),d1
+	ble.s	SER_RECV1	; branch if no handshake
+
+	move.b	CIAB_PRA,d1
+	ori.b	#%10000000,d1
+	MOVE.B	d1,CIAB_PRA	; DTR(7) low (1) not ready to receive
+
+SER_RECV1:
+	btst	#(14-8),SERDATR	; receive buffer full?
+	beq.s	SER_RECV2	; no, enable transmission
+
+	MOVE.W	SERDATR,D1	; get data
+
+	move.w	#%0000100000000000,INTREQ ; reset RBF int.
+
+	move.w	IO.QIN,a4
+	jsr	(a4)		; put byte d1 into queue a2
+	TST.W	D0		; any errors ?
+	BEQ.S	SER_RECV1	; no, check if another
+
+	bra.s	SER_RECVX	; yes, stop transmission
+
+SER_RECV2:
+	move.w	IO.QTEST,a4
+	jsr	(a4)		; check free space in queue
+
+	CMP.W	#10,D2		; receiv queue nearly full?
+	BCS.S	SER_RECVX	; yes, stop reception
+
+	move.b	CIAB_PRA,d1
+	and.b	#%01111111,d1
+	move.b	d1,CIAB_PRA	; DTR(7) high (0) ready to receive
+
+SER_RECVX:
+	movem.l	(a7)+,d0-d3/a0-a4
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  write next byte from queue to serial port
+
+SER_SEND:
+	movem.l	d0-d1/d7/a2-a4,-(a7)
+
+	move.l	SV_SER1C(a6),d1	; address of receive Q
+	beq.s	SER_S_X		; exit if Q doesn't exist
+
+	move.w	#(SER_TXQ-SER_RXQ),a2
+	adda.l	d1,a2		; address of transmit Q
+
+	move.b	1+SER_TXHS-SER_TXQ(a2),d1
+	ble.s	SER_S1
+
+	btst	#4,CIAB_PRA	; test CTS bit
+	bne.s	SER_S_X		; exit if not ready
+
+SER_S1:
+	btst	#(13-8),SERDATR	; transmit buffer empty?
+	BEQ.S	SER_S_X
+
+	moveq	#0,d1
+	move.w	IO.QOUT,a4
+	jsr	(a4)		; get byte d1 from queue a2
+	tst.l	d0
+	beq.s	SER_S_DO 	; send it if no error
+
+	move.b	CIAB_PRA,d0	; otherwise...
+	ori.b	#%01000000,d0
+	move.b	d0,CIAB_PRA	; RTS(6) low (1) nothing to send
+
+	bra.s	SER_S_X		; and exit
+
+SER_S_DO:
+	move.b	CIAB_PRA,d0
+	andi.b	#%10111111,d0
+	move.b	d0,CIAB_PRA	; RTS(6) high (0) ready to send
+
+	or.w	#$300,d1 	; set two stop bits
+	move.w	#%0000000000000001,INTREQ ; reset TBE int.
+	move.w	D1,SERDAT	; write data to serial port
+
+SER_S_X:
+	movem.l	(a7)+,d0-d1/d7/a2-a4
+	RTS
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Custom LVL7 routine to initialise hardware
+
+MY_LVL7:
+	bsr	INIT_HW
+
+	subq.l	#4,a7
+	movem.l	a3,-(a7)
+	move.l	AV.SERV,a3
+	move.l	SV.LVL7link(a3),a3
+	move.l	4(a3),4(a7)	; address of next routine
+	movem.l	(a7)+,a3
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  A patch to replace TRAP#1 calls to: MT_BAUD (d0=$12)
+
+MY_TRP1:
+	bsr	INI_A5A6
+
+	cmp.b	#$12,d0
+	beq	MT_BAUD
+
+	movem.l	(a7)+,d7/a5/a6	; restore registers
+
+	subq.l	#4,a7
+	movem.l	a3,-(a7)
+	move.l	AV.SERV,a3
+	move.l	SV.TRP1link(a3),a3
+	move.l	4(a3),4(a7)	; address of next routine
+	movem.l	(a7)+,a3
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; initialise A5 and A6 prior to performing a TRAP routine
+
+INI_A5A6
+	SUBQ.L	#8,A7
+	MOVE.L	8(A7),-(A7)
+	MOVEM.L	D7/A5/A6,4(A7)
+
+	move.l	a7,d7
+	andi.l	#$FFFF8000,d7
+	move.l	d7,a6		; Calc address of sys vars
+
+	LEA	4(A7),A5 	; A5 points to saved
+				; Registers D7,A5,A6
+	MOVEQ	#$7F,D7
+	AND.L	D7,D0
+	RTS
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  TRAP #1 with D0=$12
+;  set baud rate
+
+MT_BAUD:
+	MOVEM.L	D2/D6/A0-A2,-(A7)
+	MOVE.L	D1,D0		; D0=baudrate
+	MOVE.L	#3579546,D1	; D1=1/2.79365E-7
+
+	btst	#0,d0
+	bne.s	MT_BAUD1
+
+	lsr.l	#1,d0
+	lsr.l	#1,d1
+
+MT_BAUD1:
+	DIVU	D0,D1		; D1=D1/baudrate
+	AND.L	#$FFFF,D1	; mask out remainder
+	SUBQ.W	#1,D1		; to be exact
+;	ORI.W   #$8000	       ; we may receive two stop bits
+	move.w	d1,SERPER	; write to SERPER
+	MOVEM.L	(A7)+,D2/D6/A0-A2
+
+	moveq	#0,d0
+
+; --------------------------------------------------------------
+;  exit from TRAP call
+
+TRAP1_X	movem.l	(a7)+,d7/a5/a6	; exit from exception
+	rte
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	END

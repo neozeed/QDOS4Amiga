@@ -1,0 +1,1827 @@
+	SECTION MAIN
+
+	INCLUDE '/INC/QDOS_inc'
+	INCLUDE '/INC/AMIGA_inc'
+	INCLUDE '/INC/AMIGQDOS_inc'
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; MAIN1_asm - Amiga specific patches
+;	   - last modified 22/02/98
+
+; These are all the necessary sources required to convert a
+; standard QL specific QDOS ROM, for use on the Amiga computer.
+
+; QDOS-Amiga sources by Rainer Kowallik
+;  ...latest changes by Mark J Swift
+;  ...COPYBACK switches added by SNG
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;extras	 equ	 1
+;dotrace  equ	 1
+
+;  ROM header
+
+BASE:
+	dc.l	$4AFB0001	; ROM recognition code
+	dc.w	PROC_DEF-BASE	; add BASIC procs here
+	dc.w	ROM_START-BASE
+
+	dc.b	0,32
+	dc.b	'Amiga-QDOS MAIN o/s hooks v1.46'
+	dc.b	$A
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  start of ROM code
+
+ROM_START:
+
+; --------------------------------------------------------------
+;  enter supervisor mode and disable interrupts
+
+	trap	#0
+
+	ori.w	#$0700,sr	; disable interrupts
+
+; --------------------------------------------------------------
+;  save register entry values
+
+	movem.l	d0-d3/d6-d7/a0-a4/a6,-(a7)
+
+; --------------------------------------------------------------
+;  disable all interrupts and DMA
+
+	move.b	#$7F,CIAA_ICR	; no ints from CIA-A
+	move.b	#$7F,CIAB_ICR	; no ints from CIA-B
+	move.w	#$7FFF,INTREQ	; clear interrupt requests
+	move.w	#$7FFF,INTENA	; disable interrupts
+	move.w	#$07FF,DMACON	; no DMA, no blitter prio'ty
+	clr.b	$de0000		; no slow bus errors
+
+; --------------------------------------------------------------
+;  disable caches on '020 and above
+
+	bsr	CACHOFF		; disable caches
+	move.l	d0,d7		; save cacr value
+
+; --------------------------------------------------------------
+;  clear bitplanes and Amiga variables
+
+CLR_BP:
+	lea	$10000,a0
+	move.w	#$1FFF,d0
+CLR_BPLUP:
+	clr.l	(a0)+
+	dbra	d0,CLR_BPLUP
+
+	lea	$18200,a0
+	move.w	#$F7F,d0
+CLR_AVLUP:
+	clr.l	(a0)+
+	dbra	d0,CLR_AVLUP
+
+; --------------------------------------------------------------
+;  store amiga vars identification long word
+
+	move.w	#(AV_IDENT>>16),AV.IDENT
+	move.w	#(AV_IDENT&$FFFF),AV.IDENT+2
+
+;  clear mirror CIA variables
+
+	clr.b	AV.CIAA_ICR
+	clr.b	AV.CIAB_ICR
+	clr.b	AV.CIAA_MSK
+	clr.b	AV.CIAB_MSK
+
+; --------------------------------------------------------------
+;  allocate memory for local variables
+
+	move.l	#MV_LEN,d1
+	moveq	#MT.ALCHP,d0
+	moveq	#0,d2
+	trap	#1
+
+	move.l	a0,AV.MAIV
+	move.l	a0,a4
+
+; --------------------------------------------------------------
+;  allocate memory for ROM redirection links
+
+	move.l	#RV_LEN,d1
+	moveq	#MT.ALCHP,d0
+	moveq	#0,d2
+	trap	#1
+
+	move.l	a0,MV.RVARS(a4)
+
+; --------------------------------------------------------------
+	move.l	a7,d0
+	andi.l	#$FFFF8000,d0
+	move.l	d0,a6		; address of system vars
+
+	suba.l	a0,a0		; a handy reference point
+
+	tst.b	161(a6)
+	beq.s	STOVCTRS
+
+; --------------------------------------------------------------
+;  allocate memory and set vector base register (010+)
+
+	move.l	#1024,d1
+	moveq	#MT.ALCHP,d0
+	moveq	#0,d2
+	trap	#1
+
+	moveq	#47,d0
+	suba.l	a1,a1
+
+MOVVCTRS:
+	move.l	(a1)+,(a0)+
+	dbra	d0,MOVVCTRS
+
+	move.w	#207,d0
+	suba.l	a1,a1
+
+CLRVCTRS:
+	move.l	12*4(a1),(a0)+
+	dbra	d0,CLRVCTRS
+
+	lea	-1024(a0),a0
+
+	move.l	4*4(a0),61*4(a0)	; new illegal instruction?
+
+	dc.w	$4E7B,$8801	; movec a0,vbr
+
+; --------------------------------------------------------------
+;  Redirect RESET routine
+
+STOVCTRS:
+	move.l	MV.RVARS(a4),a2
+
+	lea	RV.RSETlink(a2),a1
+	move.l	a1,AV.RSETlink	; ptr to 1st link
+
+	clr.l	(a1)		; clear final link
+	move.l	$04(a0),$04(a1)	; address of ROM routine
+
+	lea	RSET(pc),a1	; make redirection routine
+	move.l	a1,$04(a0)	; new exception
+
+; --------------------------------------------------------------
+;  Redirect ILLEGAL interrupt routine
+
+	lea	RV.ILLGlink(a2),a1
+	move.l	a1,AV.ILLGlink	; ptr to 1st link
+
+	clr.l	(a1)		; clear final link
+	move.l	$60(a0),$04(a1)	; address of ROM routine
+
+	lea	ILLG(pc),a1	; make redirection routine
+	move.l	a1,$60(a0)	; new exception
+
+; --------------------------------------------------------------
+;  store link to LVL5 interrupt routine
+
+	lea	RV.LVL5link(a2),a1
+	move.l	a1,AV.LVL5link	; ptr to 1st link
+
+	clr.l	(a1)		; clear final link
+	move.l	$74(a0),$04(a1)	; address of ROM routine
+
+; --------------------------------------------------------------
+;  store link to LVL7 interrupt routine
+
+	lea	RV.LVL7link(a2),a1
+	move.l	a1,AV.LVL7link	; ptr to 1st link
+
+	clr.l	(a1)		; clear final link
+	move.l	$7C(a0),$04(a1)	; address of ROM routine
+
+; --------------------------------------------------------------
+;  Redirect other interrupts through relevant vectors
+
+	lea	RV.MAINlink(a2),a1
+	move.l	a1,AV.MAINlink	; ptr to 1st link
+
+	clr.l	(a1)		; clear final link
+	move.l	$68(a0),$04(a1)	; address of ROM routine
+
+	lea	MAIN(pc),a1	; make new exception for...
+	move.l	a1,$64(a0)	; level 1
+	move.l	a1,$68(a0)	; level 2
+	move.l	a1,$6C(a0)	; level 3
+	move.l	a1,$70(a0)	; level 4
+	move.l	a1,$74(a0)	; level 5
+	move.l	a1,$78(a0)	; level 6
+	move.l	a1,$7C(a0)	; level 7
+
+; --------------------------------------------------------------
+;  Redirect TRAP #0 routine
+
+	lea	RV.TRP0link(a2),a1
+	move.l	a1,AV.TRP0link	; ptr to 1st link
+
+	clr.l	(a1)		; clear final link
+	move.l	$80(a0),$04(a1)	; address of ROM routine
+
+	lea	TRP0(pc),a1	; make redirection routine
+	move.l	a1,$80(a0)	; new exception
+
+; --------------------------------------------------------------
+;  Redirect TRAP #1 routine
+
+	lea	RV.TRP1link(a2),a1
+	move.l	a1,AV.TRP1link	; ptr to 1st link
+
+	clr.l	(a1)		; clear final link
+	move.l	$84(a0),$04(a1)	; address of ROM routine
+
+	lea	TRP1(pc),a1	; make redirection routine
+	move.l	a1,$84(a0)	; new exception
+
+; --------------------------------------------------------------
+;  dislocate original polled task list
+
+	move.l	#0,SV_PLIST(a6)	; pointer to list of polled
+				; tasks
+
+; --------------------------------------------------------------
+;  link a custom routine onto the RESET routine
+
+	lea	AV.RSETlink,a1
+	lea	MV.RSETlink(a4),a2
+
+	move.l	(a1),(a2)
+	move.l	a2,(a1)
+
+	lea	MY_RSET(pc),a1
+	move.l	a1,$04(a2)
+
+; --------------------------------------------------------------
+;  link a custom routine into level 7 interrupt server
+
+	lea	AV.LVL7link,a1
+	lea	MV.LVL7link(a4),a2
+
+	move.l	(a1),(a2)
+	move.l	a2,(a1)
+
+	lea	MY_LVL7(pc),a1
+	move.l	a1,$04(a2)
+
+; --------------------------------------------------------------
+;  initialise relevant hardware
+
+	bsr	INIT_HW
+
+	move.b	AV.FLGS1,d0
+	andi.b	#%00111111,d0
+	move.b	d0,AV.FLGS1	; allow blitter activity
+
+	move.l	d7,d0
+	bsr	SETCACH
+
+; -------------------------------------------------------------
+; link in a default external interrupt routine
+
+XINT_LINK:
+	lea	XINT_SERver(pc),a1 ; address of routine
+	lea	MV.XINTLink(a4),a0
+	move.l	a1,4(a0)
+	moveq	#MT.LXINT,d0
+	trap	#1
+
+; --------------------------------------------------------------
+;  restore register entry values
+
+ROM_EXIT:
+	movem.l	(a7)+,d0-d3/d6-d7/a0-a4/a6
+
+; --------------------------------------------------------------
+CHEC_BEGin:
+	movem.l	d0/a1/a3,-(a7)
+
+; --------------------------------------------------------------
+
+	movem.l	a4-a6,-(a7)
+
+	move.l	a7,d0
+	andi.l	#$FFFF8000,d0
+	move.l	d0,a6		; address of system vars
+
+; --------------------------------------------------------------
+;  Link unused memory (system memory has to be contiguous), into
+;  common heap. Allocate ranges that do not contain memory as
+;  'used'.
+
+	move.l	SV_RAMT(a6),a3	; don't check memory beyond
+	move.l	a3,d0
+	add.l	#$00040000-1,d0	; assume ROMs < 256K and
+	andi.l	#$FFFC0000,d0	; a 256K minimum mem chunk
+	move.l	d0,a2		; probable top of RAM
+
+	cmp.l	#$1000000,a6
+	bge	ROM_DO
+
+; find last free space in common heap
+
+	lea	SV_CHPFR(a6),a5	; first free space in heap
+	subq.l	#4,a5
+
+	bra.s	CHPJMP
+
+CHPLUP:
+	adda.l	d0,a5		; next free space
+
+CHPJMP:
+	move.l	4(a5),d0
+	bne.s	CHPLUP
+
+	move.l	SV_FREE(a6),a4
+
+; link free CHIP RAM into common heap
+
+	bsr	chip_ram 	; how much CHIP RAM?
+
+	bsr	MEMLINK		; link memory into common heap
+
+	cmp.l	a2,a3
+	ble.s	MEMSKIP
+
+; link expansion memory into common heap
+
+	lea	$200000,a1
+
+ERAM_LUP:
+	bsr	expansion_ram	; how much EXPANSION RAM?
+
+	bsr	MEMLINK		; link memory into common heap
+
+	move.l	a2,a1
+	adda.l	#$10000,a1	; next 64K
+
+	cmp.l	#$A00000,a1
+	blt.s	ERAM_LUP
+
+	cmp.l	a1,a3
+	ble.s	MEMSKIP
+
+; link RANGER memory into common heap
+
+	bsr	ranger_ram
+
+	bsr	MEMLINK
+
+MEMSKIP:
+	clr.l	4(a5)		; dislocate last block of RAM
+				; from common heap.
+
+	move.l	0(a4),d0 	; length of last block of RAM
+	add.l	a4,d0
+	move.l	d0,a2		; calculate maximum RAMTOP
+
+	move.l	a4,a1		; base of free area
+
+; a1 now holds base of free area, a2 max RAM, a3 RAMTOP
+
+
+; find first usable entry in slave table
+
+	move.l	a1,d0
+	addi.l	#$1FF,d0
+	sub.l	a6,d0		; Slave blocks start at the
+	andi.w	#-$200,d0	; sys vars and are each 512
+	lsr.l	#6,d0		; bytes long.
+
+; invalidate all slave block entries outside system RAM
+
+	lea	SV_STACT(a6),a1	; first address in slave table
+	lea	0(a1,d0.l),a4	; first usable address
+
+INI_TBL1:
+	clr.l	(a1)+
+	cmpa.l	a4,a1
+	blt.s	INI_TBL1
+
+	move.l	a1,SV_BTPNT(a6)	; Store most recent block.
+
+ROM_DO:
+	movem.l	(a7)+,a4-a6
+
+; link in ROMS from RAMTOP until end of memory
+
+ROM_LUP:
+	bsr	EPROM_LInk
+
+	adda.l	#$100,a3
+	cmp.l	a3,a2		; ..until end of memory
+	bgt.s	ROM_LUP
+
+; --------------------------------------------------------------
+CHECK_EXit:
+	movem.l	(a7)+,d0/a1/a3
+
+;  enable interrupts and re-enter user mode
+
+	andi.w	#$D8FF,sr
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; default external interrupt routine to clear interrupts
+
+XINT_SERver
+	movem.l	d0,-(a7)
+
+;	 move.b	 CIAA_ICR,d0	 ; read CIA-A ICR
+;	 or.b	 AV.CIAA_ICR,d7
+;	 move.b	 d0,AV.CIAA_ICR	 ; store for later
+
+;	 move.b	 CIAB_ICR,d0	 ; read CIA-B ICR
+;	 or.b	 AV.CIAB_ICR,d0
+;	 move.b	 d0,AV.CIAB_ICR	 ; store for later
+
+;	 move.w	 #$7FFF,INTREQ	 ; clear interrupt requests
+
+	movem.l	(a7)+,d0
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; find how much CHIP RAM is installed
+
+; on exit:
+
+;   a1=0
+;   a2=CHIP top
+
+chip_ram:
+	movem.l	d0-d1/a0-a1,-(a7)
+
+	suba.l	a1,a1
+	move.l	(a1),a0
+	clr.l	(a1)
+	suba.l	a2,a2
+	move.l	#-$D2B4977,d1
+	bra.s	LF801E0
+
+LF801DE:
+	move.l	d0,(a2)
+
+LF801E0:
+	lea	$4000(a2),a2
+
+	cmpa.l	#$200000,a2	; ...or maximum CHIP RAM
+	beq.s	LF801FA
+
+	move.l	(a2),d0
+	move.l	d1,(a2)
+	nop
+	cmp.l	(a1),d1
+	beq.s	LF801FA
+
+	cmp.l	(a2),d1
+	beq	LF801DE
+
+LF801FA:
+	move.l	d0,(a2)
+	move.l	a0,(a1)
+
+	movem.l	(a7)+,d0-d1/a0-a1
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; find how much EXPANSION RAM is installed
+
+; The machine has not been reset since expansion.library of
+; AmigaDOS initialised the expansion memory. Therefore when you
+; enter	QDOS the expansion RAM should still be mapped in (if
+; there's any installed).
+
+; on entry
+
+;   a1=EXPANSION base
+
+; on exit:
+
+;   a1=EXPANSION base
+;   a2=EXPANSION top
+
+expansion_ram:
+	movem.l	d1-d2/a0/a4,-(a7)
+
+	move.l	a7,a4		; save for later
+
+	dc.w	$2078,$0008	; move.l  $08.w,a0 (bus err)
+	lea	exp_EXIT(pc),a2
+	dc.w	$21CA,$0008	; move.l  a2,$08.w
+
+	move.l	a1,a2
+
+exp_NEXT:
+	move.w	(a2),d2
+	moveq	#1,d1
+
+exp_CHEK:
+	move.w	d1,(a2)
+	cmp.w	(a2),d1
+	bne.s	exp_EXIT
+
+	lsl.w	#1,d1
+	bne.s	exp_CHEK
+
+	move.w	d2,(a2)
+	adda.l	#$10000,a2	; next 64K
+
+	cmpa.l	#$A00000,a2
+	blt.s	exp_NEXT 	; ...or max expansion RAM
+
+exp_EXIT:
+	dc.w	$21C8,$0008	; move.l  a0,$08.w
+
+	move.l	a4,a7		; tidy up stack
+
+	movem.l	(a7)+,d1-d2/a0/a4
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; find how much RANGER RAM is installed
+
+; on exit:
+
+;   a1=$C00000
+;   a2=RANGER top
+
+ranger_ram:
+	movem.l	d0-d1/a0/a4,-(a7)
+
+	lea	$C00000,a1
+	lea	$DC0000,a0
+
+	move.l	a1,a2
+
+	adda.l	#$40000,a1	; a1 holds $C40000
+
+LF80330:
+	move.l	a2,a4
+	adda.l	#$40000,a4
+
+	move.w	INTENAR,d1	; store interrupts
+	move.w	-$F66(a4),d0	; store (RAM) contents
+
+	move.w	#$7FFF,$9A-$1000(a4)	; mirror custom chips?
+	tst.w	$1C-$1000(a4)
+	bne.s	LF80352			; ...possible RAM
+
+	move.w	#$BFFF,$9A-$1000(a4)
+	cmpi.w	#$3FFF,$1C-$1000(a4)
+	bne.s	LF80352			; ...possible RAM
+
+; at this point we definitely have a mirror of the custom chips
+
+LF8038A:
+	move.w	#$7FFF,INTENA	; disable all interrupts
+
+	ori.w	#%1100000000000000,d1	; enable interrupts
+	move.w	d1,INTENA
+
+	bra.s	LF80390			; ...and exit
+
+LF80352:
+
+; may be RAM
+
+	move.l	#$F2D4,d1
+	move.w	d1,-$F66(a4)	; store test number into RAM
+	cmp.w	-$F66(a4),d1
+	bne.s	LF80390		; exit if RAM test failed
+
+	move.l	#$B698,d1
+	move.w	d1,-$F66(a4)	; store different test number
+	cmp.w	-$F66(a4),d1
+	bne.s	LF80390		; exit if RAM test failed
+
+; definitely RAM - but may be a mirror of $C00000-$C40000
+
+	cmpa.l	a1,a4
+	beq	LF80384		; addresses same? not mirror
+
+	cmp.w	-$F66(a1),d1	; mirror of previous RAM?
+	bne.s	LF80384		; no ...must be real RAM
+
+	move.l	#$F2D4,d1
+	move.w	d1,-$F66(a4)	; store test number into RAM
+
+	cmp.w	-$F66(a1),d1	; mirror of previous RAM?
+	bne.s	LF80384		; no ...must be real RAM
+
+; at this point, RAM at (a1) has proven to be a mirror of RAM at (a4)
+
+LF80380:
+	move.w	d0,-$F66(a4)	; restore RAM contents
+	bra	LF80390		; ...and exit
+
+LF80384:
+	move.w	d0,-$F66(a4)	; restore RAM contents
+
+	move.l	a4,a2
+
+	cmpa.l	a2,a0		; check against upper bound
+	bhi	LF80330
+
+LF80390:
+	suba.l	#$40000,a1	; a1 holds $C00000
+
+	movem.l	(a7)+,d0-d1/a0/a4
+
+LF8039C:
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; link memory into common heap as 'free' heap.
+
+; a1 holds base, a2 the upper limit of memory range.
+
+MEMLINK:
+	movem.l	d0-d1/a3,-(a7)
+
+	cmp.l	a1,a2		; memory range valid?
+	ble.s	MEMLINKX
+
+	cmp.l	a4,a1
+	blt.s	MEMLINK2 	; no previous range
+
+; must link the HOLES between memory ranges as 'allocated' heap
+
+	move.l	a4,a3		; find 'gap' between last
+	add.l	0(a4),a3 	; free range and this one.
+	move.l	a1,d0
+	sub.l	a3,d0
+	bne.s	MEMLINK1
+
+; no gap between last memory range and this one, so concatenate
+
+	movea.l	a4,a1
+	bra.s	MEMLINK5
+
+MEMLINK1:
+	moveq	#16,d1		; length of header
+	sub.l	d1,a3
+	add.l	d1,d0
+	move.l	d0,0(a3) 	; store a header for memory hole
+	clr.l	$4(a3)
+	clr.l	$8(a3)
+	clr.l	$C(a3)
+
+	sub.l	d1,0(a4) 	; reduce length of last range
+
+MEMLINK2:
+	cmp.l	SV_FREE(a6),a1	; common heap extended beyond
+	bge.s	MEMLINK3 	; lower bound of memory range?
+
+	move.l	SV_FREE(a6),a1	; new lower bound for memory
+
+MEMLINK3:
+	cmp.l	a4,a1
+	bne.s	MEMLINK4
+
+	movea.l	a5,a4
+
+MEMLINK4:
+	move.l	a1,d0
+	sub.l	a4,d0		; store relative pointer from
+	move.l	d0,4(a4) 	; previous block
+
+	move.l	a4,a5
+	move.l	a1,a4
+	move.l	a4,SV_FREE(a6)	; update SV_FREE
+
+MEMLINK5:
+	move.l	a2,d0
+	sub.l	a1,d0		; find length of memory block
+
+	move.l	d0,0(a1) 	; store length
+	clr.l	4(a1)		; zero pointer to next free block
+	clr.l	$8(a1)		; owner
+	clr.l	$C(a1)		; location to set/clr when removed
+
+MEMLINKX:
+	movem.l	(a7)+,d0-d1/a3
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Subroutine to check for EPROMs and link them in.
+;  Enter in supervisor mode with interrupts disabled.
+;
+;  Entry:
+;	a0 channel ID for messages
+;	a3 start address to check
+
+EPROM_LInk:
+
+	movem.l	d0-d3/a0-a3,-(a7)
+
+	andi.w	#$D8FF,sr	; enable ints & enter User
+				; mode
+	CMPI.W	#$4AFB,(A3)
+	BNE.S	EPROM_EXit
+
+	CMPI.W	#$0001,2(A3)
+	BNE.S	EPROM_EXit
+
+	LEA	8(A3),A1 	; Eprom copyright
+	MOVE.W	$D0,A2		; UT.MTEXT
+	JSR	(A2)
+
+	MOVE.W	4(A3),D0 	; any Basic extensions ?
+	BEQ.S	EPROM_INit
+
+	LEA	0(A3,D0.W),A1
+	MOVE.W	$110,A2		; BP.INIT
+	JSR	(A2)
+
+EPROM_INit:
+	MOVE.W	6(A3),D0 	; initialization procedure
+	BEQ.S	EPROM_EXit
+
+	JSR	0(A3,D0.W)	; routine must not corrupt
+				; output channel (a0) or start
+				; address (a3) and must return
+				; whilst in USER mode
+
+EPROM_EXit:
+	trap	#0		; enter supervisor mode
+	ori.w	#$0700,sr	; disable interrupts
+
+	movem.l	(a7)+,d0-d3/a0-a3
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Redirection routine for Illegal Interrupt
+
+ILLG:
+	move.w	#$7FFF,INTREQ	; clear interrupt request
+	move.w	#MAGENTA,COLOR00	; Signal bad interrupt
+
+	subq.l	#4,a7
+	movem.l	a3,-(a7)
+	move.l	AV.ILLGlink,a3
+	move.l	4(a3),4(a7)
+	movem.l	(a7)+,a3 	; address of next routine
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Custom interrupt server for main 50Hz & external.interrupts
+
+MAIN:
+	ori.w	#$0700,sr	; disable further interrupts
+	movem.l	d7/a5/a6,-(a7)
+
+	movea.l	a7,a5
+	move.l	a7,d7
+	andi.l	#$FFFF8000,d7
+	move.l	d7,a6		; address of system vars
+
+	move.w	INTENAR,d7
+	btst	#5,d7		; 50Hz ints enabled?
+	beq.s	EXTRN_INT	; no, must be another.
+
+	move.w	INTREQR,d7	; read interrupt request reg
+	btst	#5,d7		; 50Hz interrupt?
+	bne.s	FRAME_INT
+
+; --------------------------------------------------------------
+;  Let external interrupt server handle it
+;  NOTE every driver MUST clear the relevant interrupt request!
+
+EXTRN_INT:
+	move.b	#%00010000,PC_INTR ; signal external interrupt
+				 ; in QL hardware
+
+	bra.s	MAINX
+
+; --------------------------------------------------------------
+;  server for 50 Hz vertical blank interrupt
+
+FRAME_INT:
+	move.w	#%0000000000100000,INTREQ ; clear interrupts
+
+	move.b	#%00001000,PC_INTR ; signal 50Hz interrupt
+				 ; in QL hardware
+
+MAINX:
+	movem.l	(a7)+,d7/a5/a6
+
+	subq.l	#4,a7
+	movem.l	a3,-(a7)
+	move.l	AV.MAINlink,a3
+	move.l	4(a3),4(a7)	; address of next routine
+	movem.l	(a7)+,a3
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Redirect RESET routine through table
+
+RSET:
+	ori.w	#$0700,sr	; disable further interrupts
+
+	move.b	#$7F,CIAA_ICR	; no ints from CIA-A
+	move.b	#$7F,CIAB_ICR	; no ints from CIA-B
+	move.w	#$7FFF,INTREQ	; clear interrupt requests
+	move.w	#$7FFF,INTENA	; disable interrupts
+	move.w	#$07FF,DMACON	; no DMA, no blitter prio'ty
+
+	movem.l	d0,-(a7)
+	bsr	CACHOFF
+	movem.l	(a7)+,d0
+
+	subq.l	#4,a7
+	movem.l	a3,-(a7)
+	move.l	AV.RSETlink,a3
+	move.l	4(a3),4(a7)
+	movem.l	(a7)+,a3 	; address of next routine
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Redirection routine for Trap #0
+
+TRP0:
+	subq.l	#4,a7
+	movem.l	a3,-(a7)
+	move.l	AV.TRP0link,a3
+	move.l	4(a3),4(a7)	; address of next routine
+	movem.l	(a7)+,a3
+
+	ifd	dotrace
+
+	btst	#7,4(a7) 	; were we in trace mode?
+	beq.s	TRP0X
+
+	ori.w	#$8000,sr	; ...yup, trace back on.
+
+TRP0X:
+	endif
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Redirection routine for Trap #1
+
+TRP1:
+	subq.l	#4,a7
+	movem.l	a3,-(a7)
+	move.l	AV.TRP1link,a3
+	move.l	4(a3),4(a7)	; address of next routine
+	movem.l	(a7)+,a3
+
+	ifd	dotrace
+	btst	#7,4(a7) 	; were we in trace mode?
+	beq.s	TRP1X
+	ori.w	#$8000,sr	; ...yup, trace back on.
+	endif
+
+TRP1X:
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  enable relevant interrupts/DMA
+
+INIT_HW:
+	movem.l	d0,-(a7)
+
+	move.w	#%1100000000100000,INTENA ; enable 50Hz int
+
+	movem.l	(a7)+,d0
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Custom RESET routine to put back all vectors & reset computer
+
+MY_RSET:
+	movem.l	d0/a0-a3/a6,-(a7)
+
+	suba.l	a0,a0		; a handy reference
+
+	move.l	a7,d0
+	andi.l	#$FFFF8000,d0
+	move.l	d0,a6		; address of system vars
+
+	tst.b	161(a6)
+	beq.s	MY_RSET1
+
+	dc.w	$4E7A,$8801	; movec vbr,a0
+
+MY_RSET1:
+	move.l	AV.MAIV,a3
+	move.l	MV.RVARS(a3),a2
+
+	move.l	RV.RSET(a2),$04(a0)
+	move.l	RV.ILLG(a2),$60(a0) ; level 0
+	move.l	RV.LVL5(a2),$74(a0) ; level 5
+	move.l	RV.LVL7(a2),$7C(a0) ; level 7
+	move.l	RV.ILLG(a2),$64(a0) ; level 1
+	move.l	RV.ILLG(a2),$6C(a0) ; level 3
+	move.l	RV.ILLG(a2),$70(a0) ; level 4
+	move.l	RV.ILLG(a2),$78(a0) ; level 6
+	move.l	RV.MAIN(a2),$68(a0) ; level 2
+	move.l	RV.TRP0(a2),$80(a0)
+	move.l	RV.TRP1(a2),$84(a0)
+
+	move.b	161(a6),d0
+	beq.s	MY_RSET2
+
+	suba.l	a0,a0		; a handy reference
+	dc.w	$4E7B,$8801	; movec a0,vbr
+
+	cmp.b	#$40,d0
+	bcs.s	MY_RSET2
+
+;	 move.l	 #$0000C000,d1	 ; Write Through to Chip memory
+	move.l	#$0000C040,d1	; Serialize 0-16 Mb
+	dc.w	$4E7B,$1006	; movec d1,(006) DTT0
+	move.l	#$00FFC020,d1	; Copyback on all memory
+	dc.w	$4E7B,$1007	; movec d1,(007) DTT1
+
+MY_RSET2:
+	movem.l	(a7)+,d0/a0-a3/a6
+
+	subq.l	#4,a7
+	movem.l	a3,-(a7)
+	move.l	AV.MAIV,a3
+	move.l	MV.RSETlink(a3),a3
+	move.l	4(a3),4(a7)	; address of next routine
+	movem.l	(a7)+,a3
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Custom LVL7 routine to initialise hardware
+
+MY_LVL7:
+	bsr	INIT_HW
+
+	subq.l	#4,a7
+	movem.l	a3,-(a7)
+	move.l	AV.MAIV,a3
+	move.l	MV.LVL7link(a3),a3
+	move.l	4(a3),4(a7)	; address of next routine
+	movem.l	(a7)+,a3
+
+	rts
+
+*******************************************************************
+*
+* routine to disable the instruction & data caches
+* Exit:	d0 = previous CACR value
+*
+CACHOFF:
+	movem.l	d1,-(a7)
+
+	moveq	#0,d0
+	moveq	#-1,d1
+	bsr.s	DOCACH
+
+	movem.l	(a7)+,d1
+	rts
+
+*******************************************************************
+*
+* routine to set the CACR
+* Entry: d0 = value to write to CACR
+* Exit:	d0 = previous CACR value
+*
+SETCACH:
+	movem.l	d1,-(a7)
+
+	moveq	#-1,d1
+	bsr.s	DOCACH
+
+	movem.l	(a7)+,d1
+	rts
+
+*******************************************************************
+*
+* routine to alter the state of the CACR
+* callable from user or supervisor modes
+* Entry: d0 = bits to set
+*	d1 = bits to clear/alter
+* Exit:	d0 = previous CACR value
+*
+DOCACH:
+	movem.l	d2/a0/a6,-(a7)
+	movea.l	a7,a0
+	trap	#0
+	move.w	sr,-(a7)
+	ori.w	#$0700,sr	interrupts off
+
+	subq.l	#2,a0
+	cmpa.l	a0,a7
+	beq.s	DOCACHSV 	entered routine as supervisor
+
+	bclr	#5,0(a7) 	otherwise sr on exit = user mode
+
+DOCACHSV:
+	move.l	a7,d2		Calculate start of
+	andi.w	#-$8000,d2	system variables
+	move.l	d2,a6
+
+	and.l	d1,d0
+	not.l	d1
+
+	cmpi.b	#$10,$A1(a6)
+	bls.s	DOCACHX		exit if 010 or less
+
+	dc.w	$4E7A,$2002	movec	cacr,d2
+	and.l	d2,d1		mask off changed bits
+	or.l	d0,d1		or in set bits
+
+	move.l	d2,d0		store old cacr value
+
+	ori.w	#$0808,d1	always clear caches on 020/030
+
+	cmpi.b	#$30,$A1(a6)
+	bls.s	DOCACHSET
+
+	tst.w	d0		check 040 bits
+	bpl.s	DOCACHDCHK	branch if instruction cache off
+	dc.w	$F4B8		cpusha	ic
+				; otherwise update memory from cache
+
+DOCACHDCHK:
+	tst.l	d0		check 040 bits
+	bpl.s	DOCACHDINV	branch if data cache off
+	dc.w	$F478		cpusha	dc
+				; otherwise update memory from cache
+
+	tst.l	d1		check 040 bits
+	bmi.s	DOCACHIINV	branch if leaving data cache on
+
+DOCACHDINV:
+	dc.w	$F458		cinva	dc
+				; invalidate cache
+
+DOCACHIINV:
+	dc.w	$F498		cinva	ic
+				; invalidate cache
+
+DOCACHSET:
+	dc.w	$4E7B,$1002	movec	d1,cacr
+				; set the cache
+
+DOCACHX:
+	move.w	(a7)+,sr
+	movem.l	(a7)+,d2/a0/a6
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  BASIC extensions specific to AMIGA QDOS
+
+PROC_DEF:
+	ifd	extras
+
+	dc.w    28
+	dc.w	B_BL_OFF-*
+	dc.b	8,'BLIT_OFF',0
+	dc.w	B_BL_ON-*
+	dc.b	7,'BLIT_ON'
+	dc.w	RESET_RANGE-*
+	dc.b	13,'RESET_EXTENTS'
+	dc.w	RESET_TOP-*
+	dc.b	9,'RESET_TOP'
+	dc.w	RESET_SV-*
+	dc.b	8,'RESET_SV',0
+	dc.w	B_INTEN-*
+	dc.b	6,'INTENA',0
+	dc.w	B_INTRQ-*
+	dc.b	6,'INTREQ',0
+	dc.w	B_DMACN-*
+	dc.b	6,'DMACON',0
+	dc.w	DCACHE_ON-*
+	dc.b	9,'DCACHE_ON'
+	dc.w	DCACHE_OFF-*
+	dc.b	10,'DCACHE_OFF',0
+	dc.w	ICACHE_ON-*
+	dc.b	9,'ICACHE_ON'
+	dc.w	ICACHE_OFF-*
+	dc.b	10,'ICACHE_OFF',0
+
+        dc.w    COPYBACK_ON-*		; ** SNG **
+        dc.b    11,'COPYBACK_ON'
+        dc.w    COPYBACK_OFF-*
+        dc.b    12,'COPYBACK_OFF',0
+	dc.w	0
+
+	dc.w	13
+	dc.w	B_INTENR-*
+	dc.b	7,'INTENAR'
+	dc.w	B_INTRQR-*
+	dc.b	7,'INTREQR'
+	dc.w	B_DMACNR-*
+	dc.b	7,'DMACONR'
+	dc.w	B_CHIP-*
+	dc.b	4,'CHIP',0
+	dc.w	B_EXPANSION-*
+	dc.b	9,'EXPANSION'
+	dc.w	B_RANGER-*
+	dc.b	6,'RANGER',0
+	dc.w	DMODE-*
+	dc.b	5,'DMODE'
+	dc.w	CACHE_REG-*
+	dc.b	9,'CACHE_REG'
+
+	dc.w	0
+
+	endc
+
+	ifnd	extras
+
+	dc.w	22
+	dc.w	B_BL_OFF-*
+	dc.b	8,'BLIT_OFF',0
+	dc.w	B_BL_ON-*
+	dc.b	7,'BLIT_ON'
+	dc.w	RESET_RANGE-*
+	dc.b	13,'RESET_EXTENTS'
+	dc.w	RESET_TOP-*
+	dc.b	9,'RESET_TOP'
+	dc.w	RESET_SV-*
+	dc.b	8,'RESET_SV',0
+	dc.w	DCACHE_ON-*
+	dc.b	9,'DCACHE_ON'
+	dc.w	DCACHE_OFF-*
+	dc.b	10,'DCACHE_OFF',0
+	dc.w	ICACHE_ON-*
+	dc.b	9,'ICACHE_ON'
+	dc.w	ICACHE_OFF-*
+	dc.b	10,'ICACHE_OFF',0
+
+	dc.w	COPYBACK_ON-*		; ** SNG **
+	dc.b	11,'COPYBACK_ON'
+	dc.w	COPYBACK_OFF-*
+	dc.b	12,'COPYBACK_OFF',0
+
+	dc.w	0
+
+	dc.w	3
+	dc.w	DMODE-*
+	dc.b	5,'DMODE'
+	dc.w	CACHE_REG-*
+	dc.b	9,'CACHE_REG'
+
+	dc.w	0
+
+	endc
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  BASIC extensions specific to AMIGA QDOS
+
+	ifd	extras
+
+B_INTEN:
+	bsr	FETCH_W
+	bne.s	B_INTENX
+
+	cmp.l	a3,a5
+	bne	RPRT_BP
+
+	move.w	d1,INTENA
+	moveq	#0,d0
+
+B_INTENX:
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+B_INTRQ:
+	bsr	FETCH_W
+	bne.s	B_INTRQX
+
+	cmp.l	a3,a5
+	bne	RPRT_BP
+
+	move.w	d1,INTREQ
+	moveq	#0,d0
+
+B_INTRQX:
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+B_DMACN:
+	bsr	FETCH_W
+	bne.s	B_DMACNX
+
+	cmp.l	a3,a5
+	bne	RPRT_BP
+
+	move.w	d1,DMACON
+	moveq	#0,d0
+
+B_DMACNX:
+	rts
+
+	endc
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  request stop blitter
+
+B_BL_OFF:
+
+	bset	#7,AV.FLGS1	; request blit disable
+	moveq	#0,d0
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  request restart blitter
+
+B_BL_ON:
+
+	bclr	#7,AV.FLGS1	; clear blit disable
+	moveq	#0,d0
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+RESET_RANGE:
+	bsr	FETCH_L
+	bne.s	RESET_RNGXIT
+	move.l	d1,d6		; RAMTOP 'from' address
+
+	bsr	FETCH_L
+	bne.s	RESET_RNGXIT
+	move.l	d1,d7		: RAMTOP 'to' address
+
+	bsr	FETCH_L
+	bne.s	RESET_RNGXIT
+	move.l	d1,a5		: new SV address
+
+	move.l	d6,a3
+	move.l	d7,a4
+
+	trap	#0		; enter supervisor mode
+	ori.w	#$0700,sr	; disable interrupts
+
+	bsr	SYSRANGE
+
+	bsr	RNGCHK
+	bne.s	RESET_RNGX
+
+	bsr	SVCHK
+	bne.s	RESET_RNGX
+
+	bsr	RNGNEW
+	bsr	SVNEW
+
+	bra	RESET_SV1
+
+RESET_RNGX:
+	andi.w	#$D8FF,sr	; user mode, ints on
+
+RESET_RNGXIT:
+	rts			; return error
+
+
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+RESET_TOP:
+	bsr	FETCH_L
+	bne.s	RESET_TOPXIT
+	move.l	d1,d6		; ROMTOP 'from' address
+
+	bsr	FETCH_L
+	bne.s	RESET_TOPXIT
+	move.l	d1,a4		: ROMTOP 'to' address
+
+	move.l	d6,a3
+
+	trap	#0		; enter supervisor mode
+	ori.w	#$0700,sr	; disable interrupts
+
+	bsr	SYSRANGE
+	move.l	a2,a5
+
+	bsr	RNGCHK
+	bne.s	RESET_TOPX
+
+	bsr	RNGNEW
+
+	bra.s	RESET_SV1
+
+RESET_TOPX:
+	andi.w	#$D8FF,sr	; user mode, ints on
+
+RESET_TOPXIT:
+	rts			; return error
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+RESET_SV:
+	bsr	FETCH_L
+	bne.s	RESET_SVXIT
+	move.l	d1,a5		; new SV address
+
+	trap	#0		; enter supervisor mode
+	ori.w	#$0700,sr	; disable interrupts
+
+	bsr	SYSRANGE
+	move.l	a0,a1
+
+	bsr	SVCHK
+	bne.s	RESET_SVX
+
+	bsr	SVNEW
+
+RESET_SV1:
+	move.l	$0,a7		; reset supervisor stack
+
+	move.l	a7,d0
+	andi.l	#$FFFF8000,d0
+	move.l	d0,a6
+
+	suba.l	a0,a0
+
+	tst.b	161(a6)		; skip if not 010+
+	beq.s	RESET_SV2
+
+	dc.w	$4E7A,$8801	; movec vbr,a0
+
+RESET_SV2:
+	move.l	$4(a0),-(a7)	; jump to reset routine
+	rts
+
+RESET_SVX:
+	andi.w	#$D8FF,sr	; user mode, ints on
+
+RESET_SVXIT:
+	rts			; return error
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+RNGNEW:
+	move.l	a1,SV_RAMT(a2)	; new RAMTOP
+
+	cmp.l	a3,a4
+	bgt.s	MDN_TST
+	blt.s	MUP_TST
+	bra	RNGNEW_XIT
+
+MUP_LUP:
+	move.l	(a0),(a1)+	; ...move
+	clr.l	(a0)+		; ...and clear
+
+MUP_TST:
+	cmp.l	a3,a0		; until end
+	blt.s	MUP_LUP
+
+	bra.s	RNGNEW_XIT
+
+MDN_LUP:
+	move.l	-(a3),-(a4)	; ...move
+	clr.l	(a3)		; ...and clear
+
+MDN_TST:
+	cmp.l	a3,a0		; until end
+	blt.s	MDN_LUP
+
+RNGNEW_XIT:
+	rts
+
+RNGCHK:
+	move.l	a0,d1		; current RAMTOP
+	sub.l	a3,d1		; ROMTOP 'from'
+	bgt.s	RNGCHK_BP	; invalid?
+
+	add.l	a4,d1
+	move.l	d1,a1		; possible new RAMTOP
+
+	cmp.l	a5,a1
+	ble.s	RNGCHK_BP	; invalid 'to' addr
+
+	moveq	#ERR.OK,d0
+	bra.s	RNGCHK_XIT
+
+RNGCHK_BP:
+	moveq	#ERR.BP,d0
+
+RNGCHK_XIT:
+	tst.l	d0
+	rts
+
+SVNEW:
+	move.l	(a2),(a5)		; QDOS sysvars ID
+	move.l	SV_RAMT(a2),SV_RAMT(a5)	; RAMTOP
+	move.b	161(a2),161(a5)		; processor type
+	lea	$480(a5),a6
+	move.l	a6,$0			; new sys stack
+	rts
+
+SVCHK:
+	move.l	a5,d1
+	andi.w	#$7FFF,d1	; must be on 32K boundary
+	bne.s	SVCHK_BP
+
+	cmp.l	#$28000,a5
+	blt.s	SVCHK_BP
+
+	cmp.l	a2,a5		; no change?
+	beq.s	SVCHK_BP
+
+	cmp.l	a1,a5		; beyond RAMTOP?
+	bge.s	SVCHK_BP
+
+	moveq	#ERR.OK,d0	; ev'rythin' fine
+	bra.s	SVCHK_XIT
+
+SVCHK_BP:
+	moveq	#ERR.BP,d0
+
+SVCHK_XIT:
+	tst.l	d0
+	rts
+
+SYSRANGE:
+	move.l	a7,d1
+	andi.l	#$FFFF8000,d1
+	move.l	d1,a2		; address of system vars
+
+	move.l	SV_RAMT(a2),a0	; RAMTOP
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+DCACHE_OFF:
+	cmp.l	a3,a5
+	bne	RPRT_BP
+
+*		  1=data cache enable (>=040)
+*		  |		    1=clear data cache (030)
+*		  |		    |  1=data cache enable (030)
+*		  |		    |  |
+	move.l	#%00000000000000000000100000000000,d0
+	move.l	#%10000000000000000000100100000000,d1
+	bsr	DOCACH
+	moveq	#0,d0		; no errors
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+DCACHE_ON:
+	cmp.l	a3,a5
+	bne	RPRT_BP
+
+*		  1=data cache enable (>=040)
+*		  |		    1=clear data cache (030)
+*		  |		    |  1=data cache enable (030)
+*		  |		    |  |
+	move.l	#%10000000000000000000100100000000,d0
+	move.l	d0,d1
+	bsr	DOCACH
+	moveq	#0,d0		; no errors
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ICACHE_OFF:
+	cmp.l	a3,a5
+	bne	RPRT_BP
+
+*				1=instr cache enable (>=040)
+*				|	   1=clear instr cache (020,030)
+*				|	   |  1=instr cache enable(020,030)
+*				|	   |  |
+	move.l	#%00000000000000000000000000001000,d0
+	move.l	#%00000000000000001000000000001001,d1
+	bsr	DOCACH
+	moveq	#0,d0		; no errors
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ICACHE_ON:
+	cmp.l	a3,a5
+	bne	RPRT_BP
+
+*				1=instr cache enable (>=040)
+*				|	   1=clear instr cache (020,030)
+*				|	   |  1=instr cache enable(020,030)
+*				|	   |  |
+	move.l	#%00000000000000001000000000001001,d0
+	move.l	d0,d1
+	bsr	DOCACH
+	moveq	#0,d0		; no errors
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+CACHE_REG:
+	cmp.l	a3,a5
+	bne	RPRT_BP
+
+	moveq	#0,d0		; MT.INF
+	trap	#1
+	move.b	161(a0),d0
+	cmp.b	#$10,d0
+	bcs.s	RPRT_NI
+
+	trap	#0		; sv mode
+	ori	#$700,sr
+	dc.w	$4E7A,$2002	; movec	cacr,d2
+	andi.w	#$D8FF,sr	; ints on & user mode
+	move.l	d2,d1
+	bra	RET_L
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; Copyback controls by SNG, June 1995
+
+COPYBACK_ON:
+	cmp.l	a3,a5
+	bne	RPRT_BP
+
+	moveq	#0,d0		; MT.INF
+	trap	#1
+
+	move.b	161(a0),d0
+	cmp.b	#$40,d0
+	bcs.s	RPRT_NI
+
+	trap	#0		; Supervisor mode
+	ori.w	#$700,sr
+;	 move.l	 #$0000C000,d1	 ; Write Through to Chip memory
+	move.l	#$0000C040,d1	; Serialize 0-16 Mb
+	dc.w	$4E7B,$1006	; movec d1,(006) DTT0
+;
+; If TTU/ATU settings clash, DTT0 takes priority over DTT1
+;
+	move.l	#$00FFC020,d1	; Copyback on all memory
+	dc.w	$4E7B,$1007	; movec d1,(007) DTT1
+	andi.w	#$D8FF,sr	; ints on & user mode
+	moveq	#0,d0
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+COPYBACK_OFF:
+	cmp.l	a3,a5
+	bne	RPRT_BP
+	moveq	#0,d0		; MT.INF
+	trap	#1
+	move.b	161(a0),d0
+	cmp.b	#$40,d0
+	bcc.s	ATLEAST040
+RPRT_NI:
+	moveq	#ERR.NI,d0
+	rts
+
+ATLEAST040:
+
+	trap	#0		; Supervisor mode
+	ori.w	#$700,sr
+
+	dc.w	$F478		; CPUSHA dc ('040 plus)
+	move.l	#$0000C040,d1	; Serialize 0-16 Mb
+	dc.w	$4E7B,$1006	; movec d1,(006) DTT0
+	move.l	#$00FF0000,d1	; ATU off pattern
+	dc.w	$4E7B,$1007	; movec d1,(007) DTT1
+
+	andi.w	#$D8FF,sr	; ints on & user mode
+	moveq	#0,d0
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+DMODE:
+	cmp.l	a3,a5
+	bne	RPRT_BP
+
+	moveq	#-1,d1
+	moveq	#-1,d2
+	moveq	#MT.DMODE,d0
+	trap	#1
+
+	bra	RET_W
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	ifd	extras
+
+B_INTENR:
+	move.w	INTENAR,d1
+	bra	RET_W
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+B_INTRQR:
+	move.w	INTREQR,d1
+	bra	RET_W
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+B_DMACNR:
+	move.w	DMACONR,d1
+	bra	RET_W
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+B_CHIP:
+	trap	#0
+	ori.w	#$0700,sr
+
+	move.l	a7,d0
+	andi.l	#$FFFF8000,d0
+	move.l	d0,a0		; address of system vars
+
+	move.l	SV_RAMT(a0),a3	; limit for RAM check
+
+	bsr	chip_ram
+
+	andi.w	#$D8FF,sr
+	move.l	a2,d1
+	bra	RET_L
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+B_EXPANSION:
+	trap	#0
+	ori.w	#$0700,sr
+
+	move.l	a7,d0
+	andi.l	#$FFFF8000,d0
+	move.l	d0,a0		; address of system vars
+
+	lea	$200000,a1	; RAM check start address
+	move.l	SV_RAMT(a0),a3	; limit for RAM check
+
+	bsr	expansion_ram
+
+	andi.w	#$D8FF,sr
+	move.l	a2,d1
+	bra	RET_L
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+B_RANGER:
+	trap	#0
+	ori.w	#$0700,sr
+
+	move.l	a7,d0
+	andi.l	#$FFFF8000,d0
+	move.l	d0,a0		; address of system vars
+
+	move.l	SV_RAMT(a0),a3	; limit for RAM check
+
+	bsr	ranger_ram
+
+	andi.w	#$D8FF,sr
+	move.l	a2,d1
+	bra	RET_L
+
+	endc
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; Entry: A3.L   pointer to first parameter
+;	A5.L   pointer to last parameter
+;
+; Exit:	A3.L   updated
+;	A5.L   updated
+;	D0.L...error code
+;	D1.W   result
+
+FETCH_W:
+	MOVEM.L	A1-A2,-(A7)
+
+	MOVE.W	CA.GTINT,A2
+	BSR.S	GET_ONE
+	BNE.S	FETCH_WX
+
+	MOVE.W	#0,D1
+	MOVE.W	0(A6,A1.L),D1
+	ADDQ.L	#2,A1
+	MOVE.L	A1,BV_RIP(A6)
+
+FETCH_WX:
+	MOVEM.L	(A7)+,A1-A2
+	TST.L	D0
+	RTS
+
+; --------------------------------------------------------------
+; Fetch one long word
+
+FETCH_L:
+	movem.l	a2,-(a7)
+
+	move.w	CA.GTLIN,a2
+	bsr.s	GET_ONE
+	bne.s	FETCH_LX
+
+	move.l	a1,BV_RIP(a6)
+	move.l	0(a6,a1.l),d1
+	addq.l	#4,BV_RIP(a6)
+
+FETCH_LX:
+	movem.l	(a7)+,a2
+	tst.l	d0
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  This routine gets one parameter and returns it on the maths
+;  stack, pointed to by (A1).
+;
+; Entry: A2.L   routine to call (i.e. CA.GTINT)
+;	A3.L   pointer to first parameter
+;	A5.L   pointer to last parameter
+;
+; Exit:	A3.L   updated
+;	A5.L   updated
+;	A1.L   updated pointer to top of maths stack
+;	D0.L   error code
+
+GET_ONE:
+	MOVEM.L	D1-D6/A0/A2,-(A7)
+
+	LEA	8(A3),A0
+	CMP.L	A0,A5
+	BLT.S	GET_ONEBp
+
+	MOVE.L	BV_RIP(A6),A1
+	MOVE.L	A5,-(A7)
+	MOVE.L	A0,A5
+	MOVE.L	A5,-(A7)
+	JSR	(A2)
+	MOVEM.L	(A7)+,A0/A5
+
+	TST.L	D0
+	BNE.S	GET_ONEX
+
+	MOVE.L	A0,A3
+	MOVE.L	A1,BV_RIP(A6)
+
+	BRA.S	GET_ONEX
+
+GET_ONEBp:
+	MOVEQ	#ERR.BP,D0
+
+GET_ONEX:
+	MOVEM.L	(A7)+,D1-D6/A0/A2
+	TST.L	D0
+	RTS
+
+; --------------------------------------------------------------
+;  Return word d1.w to BASIC
+
+RET_W:
+	move.l	d1,d4
+	moveq.l	#2,d1
+	move.w	BV.CHRIX,a2
+	jsr	(a2)
+	move.l	d4,d1
+
+	move.l	BV_RIP(a6),a1	; Get arith stack pointer
+	subq.l	#2,a1		; room for 2 bytes
+	move.l	a1,BV_RIP(a6)
+	move.w	d1,0(a6,a1.l)	; Put int number on stack
+	moveq.l	#3,d4		; set Integer type
+
+	moveq.l	#ERR.OK,d0	; no errors
+	rts
+
+; -------------------------------------------------------------
+;    Return long Integer d1.l to BASIC
+
+RET_L:
+	move.l	d1,d4
+	moveq.l	#6,d1
+	move.w	BV.CHRIX,a2
+	jsr	(a2)
+	move.l	d4,d1
+
+	bsr.s	CONV_L2F
+	subq.l	#6,BV_RIP(a6)
+	move.l	BV_RIP(a6),a1
+	move.w	d2,0(a6,a1.l)
+	move.l	d1,2(a6,a1.l)
+	moveq.l	#2,d4
+
+	moveq.l	#ERR.OK,d0
+	rts
+
+; -------------------------------------------------------------
+;  convert long Integer to floating point form.
+;  Entry: d1.l = long int
+;  Exit:  d1.w = mantissa
+;	 d2.l = exponent
+
+CONV_L2F:
+	move.l	d1,d2
+	beq.s	CONV_L2FX
+
+	move.w	#$81F,d2
+	move.l	d1,-(a7)
+
+CONV_L2F1:
+	add.l	d1,d1
+	bvs.s	CONV_L2F2
+
+	subq.w	#1,d2
+	move.l	d1,(a7)
+	bra.s	CONV_L2F1
+
+CONV_L2F2:
+	move.l	(a7)+,d1
+
+CONV_L2FX:
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+RPRT_BP:
+	moveq	#ERR.BP,d0
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	END

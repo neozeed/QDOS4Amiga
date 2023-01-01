@@ -1,0 +1,12 @@
+dd if=obj/ace.o of=rom/ace.rom bs=28 skip=1
+dd if=obj/flp.o of=rom/flp.rom bs=28 skip=1
+dd if=obj/jan.o of=rom/jan.rom bs=28 skip=1
+dd if=obj/kbd.o of=rom/kbd.rom bs=28 skip=1
+dd if=obj/keyuk.o of=rom/keyuk.rom bs=32 skip=1
+dd if=obj/main.o of=rom/main.rom  bs=28 skip=1
+dd if=obj/mdv.o of=rom/mdv.rom  bs=28 skip=1
+dd if=obj/par.o of=rom/par.rom bs=28 skip=1
+dd if=obj/ser.o of=rom/ser.rom bs=28 skip=1
+dd if=obj/snd.o of=rom/snd.rom bs=28 skip=1
+dd if=obj/sys.o of=rom/sys.rom bs=28 skip=1
+dd if=obj/vdu.o of=rom/vdu.rom bs=28 skip=1

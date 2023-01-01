@@ -1,0 +1,27 @@
+*/beginfile FLP_asm
+; --------------------------------------------------------------
+; FLP_asm - Amiga QDOS floppy disk device driver
+;	 - last modified 04/03/95
+
+; These are all the necessary sources required to implement a
+; QDOS floppy disk device driver on the Amiga computer.
+
+; QDOS-Amiga sources by Rainer Kowallik
+;    ...some changes by Mark J Swift
+; --------------------------------------------------------------
+
+	SECTION	FLP
+
+;debug	 equ	 1
+;extras	 equ	 1
+;extras2  equ	 1
+
+	INCLUDE	'/INC/QDOS_inc'
+	INCLUDE	'/INC/AMIGA_inc'
+	INCLUDE	'/INC/AMIGQDOS_inc'
+	INCLUDE	'FLP1_asm'
+	INCLUDE	'FLP2_asm'
+
+	END
+; --------------------------------------------------------------
+*/endfile

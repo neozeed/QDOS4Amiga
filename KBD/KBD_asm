@@ -1,0 +1,1842 @@
+	SECTION	KBD
+
+	INCLUDE	'/INC/QDOS_inc'
+	INCLUDE	'/INC/AMIGA_inc'
+	INCLUDE	'/INC/AMIGQDOS_inc'
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; KBD1_asm - Keyboard routines
+;	  - last modified 22/02/98
+
+; These are all the necessary keyboard related sources, required
+; to implement QDOS keyboard routines on the Amiga computer.
+
+; Amiga-QDOS sources by Rainer Kowallik
+;  ...latest changes by Mark J Swift
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  ROM header
+
+BASE:
+	dc.l	$4AFB0001	; ROM recognition code
+	dc.w	PROC_DEF-BASE	; add BASIC procs here
+	dc.w	ROM_START-BASE
+	dc.b	0,36,'Amiga-QDOS KEYBOARD routines v1.33 ',$A
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  start of ROM code
+
+ROM_START:
+	movem.l	d0-d3/a0-a3,-(a7)
+
+; --------------------------------------------------------------
+;  allocate memory for keyboard variables
+
+	move.l	#KV_LEN,d1
+	moveq	#MT.ALCHP,d0
+	moveq	#0,d2
+	trap	#1
+
+; --------------------------------------------------------------
+;  address of keyboard variables
+
+	move.l	a0,AV.KEYV
+	move.l	a0,a3
+
+; --------------------------------------------------------------
+;  enter supervisor mode and disable interrupts
+
+	trap	#0
+
+	ori.w	#$0700,sr	; disable interrupts
+
+; --------------------------------------------------------------
+;  link a custom routine into level 7 interrupt server
+
+	lea	AV.LVL7link,a1
+	lea	KV.LVL7link(a3),a2
+
+	move.l	(a1),(a2)
+	move.l	a2,(a1)
+
+	lea	MY_LVL7(pc),a1
+	move.l	a1,$04(a2)
+
+; --------------------------------------------------------------
+;  link a custom routine into Trap #1 exception
+
+	lea	AV.TRP1link,a1
+	lea	KV.TRP1link(a3),a2
+
+	move.l	(a1),(a2)
+	move.l	a2,(a1)
+
+	lea	MY_TRP1(pc),a1
+	move.l	a1,$04(a2)
+
+; --------------------------------------------------------------
+;  initialise relevant hardware
+
+	bsr	INIT_HW
+
+; -------------------------------------------------------------
+; link in external interrupt to act on keyboard press
+
+	lea	XINT_SERver(pc),a1 ; address of routine
+	lea	KV.XINTLink(a3),a0
+	move.l	a1,4(a0)
+	moveq	#MT.LXINT,d0
+	trap	#1
+
+; --------------------------------------------------------------
+;  link in polled task routine to handle keyboard
+
+	lea	POLL_SERver(pc),a1 ; address of routine
+	lea	KV.POLLLink(a3),a0
+	move.l	a1,4(a0) 	; address of polled task
+	moveq	#MT.LPOLL,d0
+	trap	#1
+
+; --------------------------------------------------------------
+;  enable interrupts and re-enter user mode
+
+	andi.w	#$D8FF,sr
+
+; --------------------------------------------------------------
+ROM_EXIT:
+	movem.l	(a7)+,d0-d3/a0-a3
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  initialise keyboard for use.
+
+INIT_HW:
+	movem.l	d0-d2/a0/a3,-(a7)
+
+; --------------------------------------------------------------
+;  set ASCII table and clear actual key.
+
+	move.l	AV.KEYV,a3	; address of keyboard vars
+
+	lea	QLASCII(pc),a0
+	move.l	a0,KV.QLASCtbl(a3)
+
+	clr.w	KV.ACTKEy(a3)	; reset actual key
+
+	move.w	#0,KV.PTRMINX(a3)
+	move.w	#0,KV.PTRMINY(a3)
+	move.w	#255,KV.PTRMAXX(a3)
+	move.w	#255,KV.PTRMAXY(a3)
+
+	move.w	#0,KV.PTROLDX(a3)
+	move.w	#0,KV.PTROLDY(a3)
+
+	move.w	#0,KV.PTRX(a3)
+	move.w	#0,KV.PTRY(a3)
+
+	move.w	#4,KV.PTRINCX(a3)
+	move.w	#8,KV.PTRINCY(a3)
+
+	move.w	JOY0DAT,KV.STOMOuse(a3)
+
+	sf	KV.QIMIFLG(a3)
+; --------------------------------------------------------------
+;  initialise hardware
+
+	move.b	CIAA_ICR,d0	; read & clear CIA-A ICR
+	or.b	AV.CIAA_ICR,d0
+	bclr	#3,d0		; clear SP bit
+	move.b	d0,AV.CIAA_ICR	; store for another program
+
+	move.w	#%0000000000001000,INTREQ ; clear and enable
+	move.w	#%1000000000001000,INTENA ; CIA-A interrupts
+
+	move.b	#%10001000,CIAA_ICR ; enable SP interrupt
+
+	ori.b	#%00001000,AV.CIAA_MSK ; take note
+
+	movem.l	(a7)+,d0-d2/a0/a3
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  external interrupt server
+
+XINT_SERver:
+	movem.l	d7/a0,-(a7)
+
+XINT_TST:
+	move.w	INTENAR,d7	; read interrupt enable reg
+	btst	#3,d7		; branch if ints not on
+	beq	XINT_OTHer
+
+	move.w	INTREQR,d7	; read interrupt request reg
+	btst	#3,d7		; branch if from CIA-A or
+	bne	CIAA_SERV	; expansion ports
+
+; --------------------------------------------------------------
+;  otherwise let another external interrupt server handle it
+
+XINT_OTHer:
+	movem.l	(a7)+,d7/a0
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Interrupt from CIA-A or expansion port
+
+CIAA_SERV:
+	move.b	CIAA_ICR,d7	; read CIA-A ICR
+	or.b	AV.CIAA_ICR,d7
+	move.b	d7,AV.CIAA_ICR	; store for another program
+
+	bclr	#3,d7		; keyboard? (SP bit=1)
+	beq	XINT_OTHer	; no
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; external interrupt server for acting on an a key press.
+; The Result is stored in KV.ACTKEy (word) (MSB=ASCII,LSB=ALT)
+
+RDKEYB:
+	move.b	d7,AV.CIAA_ICR
+
+	and.b	AV.CIAA_MSK,d7	; don't clear intreq if
+	bne.s	RDKEYB0		; other CIAA ints occured
+
+	move.w	#%0000000000001000,INTREQ ; clear interrupts
+
+; --------------------------------------------------------------
+RDKEYB0:
+	movem.l	d0/a0/a3,-(a7)
+
+	move.l	AV.KEYV,a3	; address of keyboard vars
+
+	BSR	KEYread
+
+	tst.b	KV.ACTKEy+1(a3)
+	beq	RDKEYBX
+
+; --------------------------------------------------------------
+;  Check for CTRL-ALT-2 and simulate a level 2 interrupt
+
+RDKEYB1:
+	move.w	KV.ACTKEy(a3),d0
+	cmp.w	#$92FF,d0	; CTRL 2/ALT ?
+	bne.s	RDKEYB2
+
+	clr.w	KV.ACTKEy(a3)	; reset keypress
+
+	ori.w	#$0700,sr	; mask out all interrupts
+
+	move.w	#$8000,d7
+
+WAITABIT2:
+	move.w	#RED,COLOR00	; signal forced interrupt
+	move.w	#0,COLOR00	; via DMA-test pattern
+	dbra	d7,WAITABIT2
+
+	adda.l	#$24,a7		;*/note JS specific
+	movem.l	(a7)+,d0-d6/a0-a4 ; drop out of external
+	movem.l	(a7)+,d7/a5/a6	; interrupt call
+
+	subq.l	#4,a7
+	movem.l	a3,-(a7)
+	move.l	AV.MAINlink,a3
+	move.l	4(a3),4(a7)	; address of 1st routine
+	movem.l	(a7)+,a3
+	rts			; jump to routine
+
+; --------------------------------------------------------------
+;  Check for CTRL-ALT-5 and simulate a level 5 interrupt
+
+RDKEYB2:
+	move.w	KV.ACTKEy(a3),d0
+	cmp.w	#$95FF,d0	; CTRL 5/ALT ?
+	bne.s	RDKEYB3
+
+	clr.w	KV.ACTKEy(a3)	; reset keypress
+
+	ori.w	#$0700,sr	; mask out all interrupts
+
+	move.w	#$8000,d7
+
+WAITABIT5:
+	move.w	#CYAN,COLOR00	; signal forced interrupt
+	move.w	#0,COLOR00	; via DMA-test pattern
+	dbra	d7,WAITABIT5
+
+	adda.l	#$24,a7		;*/note JS specific
+	movem.l	(a7)+,d0-d6/a0-a4 ; drop out of external
+	movem.l	(a7)+,d7/a5/a6	; interrupt call
+
+	subq.l	#4,a7
+	movem.l	a3,-(a7)
+	move.l	AV.LVL5link,a3
+	move.l	4(a3),4(a7)	; address of 1st routine
+	movem.l	(a7)+,a3
+	rts			; jump to routine
+
+; --------------------------------------------------------------
+;  Check for CTRL-ALT-7 and simulate a level 7 interrupt
+
+RDKEYB3:
+	move.w	KV.ACTKEy(a3),d0
+	cmp.w	#$97FF,d0	; CTRL 7/ALT ?
+	bne.s	RDKEYB4
+
+	clr.w	KV.ACTKEy(a3)	; reset keypress
+
+	ori.w	#$0700,sr	; mask out all interrupts
+
+	move.b	#$7F,CIAA_ICR	; no ints from CIA-A
+	move.b	#$7F,CIAB_ICR	; no ints from CIA-B
+	move.w	#$7FFF,INTREQ	; clear interrupt requests
+	move.w	#$7FFF,INTENA	; disable interrupts
+
+ALT7_BZY:
+	btst	#6,DMACONR	; wait for blitter
+	bne.s	ALT7_BZY
+
+	move.w	#$07FF,DMACON	; no DMA, no blitter prio'ty
+
+	move.w	#$8000,d7
+
+WAITABIT7:
+	move.w	#WHITE,COLOR00	; signal forced interrupt
+	move.w	#0,COLOR00	; via DMA-test pattern
+	dbra	d7,WAITABIT7
+
+	adda.l	#$24,a7		;*/note JS specific
+	movem.l	(a7)+,d0-d6/a0-a4 ; drop out of external
+	movem.l	(a7)+,d7/a5/a6	; interrupt call
+
+	subq.l	#4,a7
+	movem.l	a3,-(a7)
+	move.l	AV.LVL7link,a3
+	move.l	4(a3),4(a7)	; address of 1st routine
+	movem.l	(a7)+,a3
+	rts			; jump to routine
+
+; --------------------------------------------------------------
+;  Check for CTRL-SHIFT-ALT-TAB and perform a reset
+
+RDKEYB4:
+	move.l	KV.SHIFTflg(a3),d0
+	cmp.l	#(%00000111<<24)|$09FF,d0 ; ALT/CTRL/SHIFT/TAB/ALT
+	bne	RDKEYB5
+
+	clr.w	KV.ACTKEy(a3)	; reset keypress
+
+	ori.w	#$0700,sr	; mask out all interrupts
+
+	move.b	#$7F,CIAA_ICR	; no ints from CIA-A
+	move.b	#$7F,CIAB_ICR	; no ints from CIA-B
+	move.w	#$7FFF,INTREQ	; clear interrupt requests
+	move.w	#$7FFF,INTENA	; disable interrupts
+
+ALTT_BZY:
+	btst	#6,DMACONR	; wait for blitter
+	bne.s	ALTT_BZY
+
+	move.w	#$07FF,DMACON	; no DMA, no blitter prio'ty
+
+	movem.l	d0-d1/a6,-(a7)
+
+	move.l	a7,d1		Calculate start of
+	andi.w	#-$8000,d1	system variables
+	move.l	d1,a6
+
+	cmpi.b	#$10,$A1(a6)
+	bls.s	DOCACHX		exit if 010 or less
+
+	dc.w	$4E7A,$0002	movec	cacr,d0
+	move.l	#$0808,d1	clear/disable caches
+
+	cmpi.b	#$30,$A1(a6)
+	bls.s	DOCACHSET
+
+	tst.w	d0		check 040 bits
+	bpl.s	DOCACHDCHK	branch if instruction cache off
+	dc.w	$F4B8		cpusha	ic
+				; otherwise update memory from cache
+
+DOCACHDCHK:
+	tst.l	d0		check 040 bits
+	bpl.s	DOCACHINV	branch if data cache off
+	dc.w	$F478		cpusha	dc
+				; otherwise update memory from cache
+
+DOCACHINV:
+	dc.w	$F4D8		cinva	ic/dc
+				; invalidate caches
+
+DOCACHSET:
+	dc.w	$4E7B,$1002	movec	d1,cacr
+				; set the cache
+
+DOCACHX:
+	movem.l	(a7)+,d0/a0/a3
+
+	movem.l	(a7)+,d7
+
+	move.l	$0,a7		; reset supervisor stack
+
+	move.l	$4,-(a7) 	; call first reset routine
+	rts
+
+; --------------------------------------------------------------
+RDKEYB5:
+
+RDKEYBX:
+	movem.l	(a7)+,d0/a0/a3
+
+; -------------------------------------------------------------
+XINT_EXIt:
+
+*	 bra	 XINT_TST
+	bra	XINT_OTHer
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Subroutine to read keyboard value from hardware
+
+KEYread:
+	movem.l	d0-d3/a0/a3,-(a7)
+
+	move.l	AV.KEYV,a3	; address of keyboard vars
+
+	lea	CIAA,a0		; now implement Keyboard
+	moveq	#0,d0		; handshake according to
+	move.b	d0,CRA(a0)	; ROM listing ($FE5478)
+	move.b	d0,CRA(a0)
+	move.b	#$40,CRA(a0)	; switch off keyboard
+
+	move.b	CIAA_SP,d0	; read raw key code
+
+	move.l	#$40,d2
+WTKEYB0:
+	nop
+	dbra	d2,WTKEYB0
+
+	move.b	#$0,CIAA_CRA	; switch on keyboard again
+
+	MOVE.L	#255,D1
+	SUB.B	D0,D1		; calculate key stroke
+	LSR.B	#1,D1
+	AND.W	#1,D0		; only press/release bit
+
+; --------------------------------------------------------------
+; first convert to QL raw key code
+
+	LEA	QLRAWKEY(PC),A0
+	MOVEQ	#0,D2
+	MOVE.B	0(A0,D1.W),D2	; get row and bit number
+	bge.s	KEYrd2b		; branch on valid key
+
+	clr.w	KV.ACTKEy(a3)	; otherwise, reset actual key
+
+	lea	KV.STORAwkey(a3),a0
+	clr.l	(a0)+
+	clr.l	(a0)+		; invalidate KEYROW bits
+	clr.l	(a0)+
+	clr.l	(a0)+
+
+	clr.w	$90(a6)		; disable key repeat
+	bra	KEYrdX1
+
+KEYrd2b:
+	MOVE.L	D2,D3
+	LSR.L	#4,D3		; extract row number -> D3
+	AND.W	#$7,D3
+	AND.B	#$07,D2		; extract bit number -> D2
+	lea	KV.STORAwkey(a3),a0
+	BSET	D2,0(A0,D3.W)
+	CMP.B	#1,D0		; press or release ?
+	BEQ.S	KEYCVASC
+	BCLR	D2,0(A0,D3.W)
+
+; --------------------------------------------------------------
+; now convert to ASCII
+
+KEYCVASC:
+	MOVE.W	#$FFFE,D2	; mask for AND
+	CMP.B	#$60,D1		; shift/alt/amiga ?
+	BLT.S	KEYrd2		; ...nope
+	CMP.B	#$62,D1		; Caps lock ?
+	BNE.S	KEYrd2a		  ...nope
+	CMP.B	#1,D0		; Caps on or off ?
+	SEQ	D0
+	lea	SV_CAPS(a6),A0	; address $28088
+	MOVE.B	D0,(A0)		; set CAPS flag
+	BRA	KEYrdX
+
+KEYrd2a:
+	AND.B	#$7E,D1		; Don't distinguish
+				; right/left
+	CMP.B	#$60,D1		; Shift ?
+	BEQ.S	KEYrd1
+	LSL.W	#1,D0		; Bit 0 for Shift, 1 for
+				; ctrl
+	ROL.W	#1,D2
+	CMP.B	#$62,D1		; CTRL ?
+	BEQ.S	KEYrd1
+	LSL.W	#1,D0		; Bit 2 for Alt, 3 for Amiga
+	ROL.W	#1,D2
+	CMP.B	#$64,D1		; ALT ?
+	BEQ.S	KEYrd1
+	LSL.W	#1,D0
+	ROL.W	#1,D2
+	CMP.B	#$66,D1		; AMIGA ?
+	bne	KEYrdX		; should never happen!
+KEYrd1:
+	lea	KV.SHIFTflg(a3),a0 ; get address of flag
+	AND.B	D2,(A0)		; clear old status bit
+	OR.B	D0,(A0)		; and set new status
+	andi.w	#$0F00,(a0)	; only keep modifiers
+
+	clr.w	KV.ACTKEy(a3)	; reset actual key
+
+	BRA	KEYrdX
+
+; --------------------------------------------------------------
+;  convert keycode (D1) and write result to ACTkey
+
+KEYrd2:
+	CMP.B	#1,D0		; press or just release ?
+	BEQ.S	KEYrd3
+	clr.w	KV.ACTKEy(a3)	; reset actual key
+	bra	KEYrdX
+KEYrd3:
+	lea	KV.SHIFTflg(a3),a0
+	MOVE.B	(A0),D2		; get current status of
+				; Shift
+	MOVE.B	D2,D0		; store for ALT check
+	AND.B	#$3,D2		; don't bother with Alt or
+				; Amiga
+	move.l	KV.QLASCtbl(a3),a0 ; first try no shifts
+	CMP.B	#0,D2
+	BEQ.S	KEYrd4
+
+	lea	$60(a0),a0	; next try Shift only
+	CMP.B	#1,D2
+	BEQ.S	KEYrd4
+
+	lea	$60(a0),a0	; now try ctrl only
+	CMP.B	#2,D2
+	BEQ.S	KEYrd4
+
+	lea	$60(a0),a0	; must be <Ctrl>+<Shift>
+
+KEYrd4:
+	andi.b	#%01111111,d0	; assume 'special'
+	cmp.b	#$40,d1
+	bge.s	KEYrd5		; ...skip if so
+
+	ori.b	#%10000000,d0	; indicate a-z, 0-9
+
+KEYrd5:
+	move.b	d0,KV.SHIFTflg(a3)
+
+	MOVE.B	0(A0,D1.W),D1	; get ASCII value
+	lea	SV_CAPS(a6),a0	; address $28088
+	TST.B	(A0)		; check for CAPS lock
+	BEQ.S	KEYrd6
+	CMP.B	#'a',D1		; check for lower case
+				; letter
+	BLT.S	KEYrd6
+	CMP.B	#'z',D1
+	BGT.S	KEYrd6
+	SUB.B	#32,D1		; change to upper case
+				; letter
+KEYrd6:
+	lea	KV.ACTKEy(a3),a0
+	MOVE.B	D1,(A0)		; Store new key
+	BTST	#2,D0		; ALT flag set ?
+	SNE	D0
+	MOVE.B	D0,1(A0) 	; store ALT flag
+	MOVE.W	(A0),D0		; check for ALT and cursor
+				; key
+	AND.W	#$E0FF,D0	; don't bother with
+				; up,right,left,down
+	CMP.W	#$C0FF,D0	; check for cursor key
+	BNE.S	KEYrd7
+	ADD.B	#1,(A0)		; now make correct key code
+	CLR.B	1(A0)		; and clear ALT flag
+
+KEYrd7:
+	move.w	KV.ACTKEy(a3),d0
+	cmpi.b	#$FF,d0		; if part of ALT combination
+	beq.s	KEYrdX		; exit now & let polled int
+				; put key into Q
+
+	bsr	POLL_K		; otherwise put into Q
+
+KEYrdX:
+	MOVE.W	$8C(A6),$90(A6)	; delay -> count
+
+KEYrdX1:
+	movem.l	(a7)+,d0-d3/a0/a3
+	RTS
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Polled interrupt routine to read the keyboard
+
+POLL_SERver:
+
+	move.l	AV.KEYV,a3	; address of keyboard vars
+
+	move.w	JOY0DAT,d0	; get counter
+	move.w	KV.STOMOuse(a3),d5
+	move.w	d0,KV.STOMOuse(a3); store for next time
+
+	tst.b	KV.QIMIFLG(a3)
+	bne.s	POLL_a
+
+	cmp.w	d5,d0
+	beq.s	POLL_K
+
+	move.w	KV.PTRX(a3),d1
+	move.w	KV.PTRY(a3),d2
+	move.w	KV.PTRERRX(a3),d3
+	move.w	KV.PTRERRY(a3),d4
+
+	bra.s	POLL_c
+
+POLL_a:
+	MOVE.L	SV_CHBAS(A6),A4	; Lese PTR
+	MOVE.L	(A4),A4		; 'Con' Treiber
+	MOVE.L	4(A4),A4 	; nach A4
+
+	move.w	$20(a4),d1	; QIMI X
+	lsr.w	#1,d1
+	move.w	$22(a4),d2	; QIMI Y
+
+	moveq	#0,d3
+	moveq	#0,d4
+
+	cmp.w	d5,d0
+	beq.s	POLL_e
+
+POLL_c:
+	sub.b	d5,d0
+	move.b	d0,d6
+	ext.w	d6
+	add.w	d6,d1
+
+	bsr	PTR_CLPX
+
+	ror.w	#8,d0
+	ror.w	#8,d5
+
+	sub.b	d5,d0
+	move.b	d0,d6
+	ext.w	d6
+	add.w	d6,d2
+
+	bsr	PTR_CLPY
+
+	tst.b	KV.QIMIFLG(a3)
+	beq.s	POLL_e
+
+	lsl.w	#1,d1
+	move.w	d1,$20(a4)	; QIMI X
+	move.w	d2,$22(a4)	; QIMI Y
+	move.b	#0,$16(a4)	; QIMI accumulator
+	lsr.w	#1,d1
+
+POLL_e:
+	move.w	d1,KV.PTRX(a3)
+	move.w	d2,KV.PTRY(a3)
+
+	move.w	d3,KV.PTRERRX(a3)
+	move.w	d4,KV.PTRERRY(a3)
+
+	bsr	PTR_POS
+
+POLL_K:
+	MOVEA.L	$4C(A6),A2	; SV.KEYQ Pointer to a
+				; keyboard queue
+
+	MOVE.L	A2,D0
+	beq.s	POLL_EXIt	; no con_ open
+
+	tst.b	(a2)
+	blt.s	POLL_EXIt	; eof
+
+POLL_3:
+	move.l	KV.SHIFTflg(a3),d1 ; read Shift flags and
+				 ; ACTkey
+
+	ROR.W	#8,D1		; rotate ascii in position
+	cmp.b	#0,d1		; any key pressed ?
+	bne.s	L02EEC		; yup!
+
+NOKEY:
+	CLR.W	$8A(A6)		; reset Autorepeat buffer
+
+POLL_EXIt:
+	rts
+
+; --------------------------------------------------------------
+L02EEC:
+	CMP.L	#(%00000010<<24)|$0020,D1 ; <CTL><SPC> ?
+	BEQ	DO_BREAK
+
+	CMPI.W	#$00F9,D1	; = <CTL><F5> freeze
+	BEQ	FREEZE
+
+	SF	$33(A6)		; screen status
+	CMP.W	$92(A6),D1	; SV.CQCH Keyboard change
+	BEQ	CTRL_C		; queue character code
+
+	CMP.W	$8A(A6),D1	; New Key ?
+	BEQ.S	AREPOLD
+
+	MOVE.W	D1,$8A(A6)	; store Key
+	MOVE.W	$8C(A6),$90(A6)	; delay -> count
+	BRA.S	AREPDO
+
+; --------------------------------------------------------------
+AREPOLD:
+	cmp.w	#1,SV_POLLM(a6)	; no key repeat if part of
+	bgt	POLL_EXIt	; a 'poll miss' time-slice
+
+	MOVE.W	$90(A6),D2	; get actual count
+	tst.w	d2
+	beq.s	POLL_EXIt	; exit if key-repeat disabled
+
+	SUBQ.W	#1,D2		; decrement count
+	MOVE.W	D2,$90(A6)	; and store new value
+	TST.W	D2		; 0 reached ?
+	bne	POLL_EXIt	; do nothing if not
+
+	MOVE.W	$8E(A6),$90(A6)	; SV.ARFRQ Autorepeat
+				; 1/frequency
+
+	move.l	d1,d3		; save key-stroke
+	move.w	IO.QTEST,a3
+	jsr	(a3)
+	beq	POLL_EXIt	; exit if queue not empty
+
+	move.l	d3,d1		; restore key-stroke
+
+; --------------------------------------------------------------
+AREPDO:
+	cmpi.w	#$FF0A,d1	; <ALT>-<RTN>
+	beq.s	DO_HISTORY
+
+	cmpi.l	#(%00000010<<24)|$0009,d1 ; <CTL>-<TAB>
+	beq.s	DO_FLIP
+
+	ror.w	#8,d1
+
+	CMPI.B	#$FF,D1		; <ALT> key ?
+	BNE.S	L02F36
+
+	SWAP	D1
+	move.w	IO.QTEST,a3
+	jsr	(a3)
+
+	CMPI.W	#2,D2
+	BLT	POLL_EXIt
+
+	SWAP	D1
+	move.w	IO.QIN,a3	; put a byte (D1) into a
+	jsr	(a3)		; queue (A2)
+
+L02F36:
+	LSR.W	#8,D1
+	move.w	IO.QIN,a3	; put a byte (D1) into a
+	jsr	(a3)		; queue (A2)
+
+	bra	POLL_EXIt
+
+; --------------------------------------------------------------
+DO_HISTORY:
+
+	move.l	Q_NEXTIN(a2),a3
+	cmp.l	Q_NXTOUT(a2),a3
+	bne	POLL_EXIt
+
+	lea	$10(a2),a4
+
+DO_HLUP1:
+	cmp.l	a4,a3
+	bne.s	DO_HIS1
+
+	move.l	Q_END(a2),a3
+
+DO_HIS1:
+	cmp.b	#$0A,-(a3)
+	beq.s	DO_HIS2
+
+	cmp.l	Q_NXTOUT(a2),a3
+	bne.s	DO_HLUP1
+
+	bra	POLL_EXIt
+
+DO_HIS2:
+	move.l	a3,Q_NEXTIN(a2)
+	move.l	a3,Q_NXTOUT(a2)
+
+DO_HLUP2:
+	cmp.l	a4,a3
+	bne.s	DO_HIS3
+
+	move.l	Q_END(a2),a3
+
+DO_HIS3:
+	cmp.b	#$0A,-(a3)
+	bne.s	DO_HLUP2
+
+DO_HIS4:
+	addq.l	#1,a3
+	cmpa.l	Q_END(a2),a3
+	blt.s	DO_HIS5
+
+	lea	$10(a2),a3
+
+DO_HIS5:
+	move.l	a3,Q_NXTOUT(a2)
+
+	bra	POLL_EXIt
+
+; --------------------------------------------------------------
+DO_FLIP:
+	bsr	FLIPIT
+	bra	POLL_EXIt
+
+FLIPIT:
+	moveq	#0,d0
+	move.b	SV_MCSTA(a6),d0
+
+	swap	d1
+	lsl.w	#4,d0
+	move.b	d0,d1
+	andi.b	#%10100000,d1
+	lsr.b	#2,d1
+	andi.b	#%01010000,d0
+	or.b	d1,d0
+	lsl.b	#1,d0
+	lsr.w	#4,d0
+	swap	d1
+
+	eori.b	#1<<MC..SCRN,d0	; flip between screen 1/2
+	move.b	d0,SV_MCSTA(a6)
+	andi.b	#%10001010,d0
+	move.b	d0,MC_STAT	; switch screen if necessary
+
+	rts
+
+; --------------------------------------------------------------
+DO_BREAK:
+	CLR.W	KV.ACTKEy(A3)	; reset BREAK request
+	SF	$33(A6)		; screen status
+
+	MOVEA.L	$68(A6),A3	; SV.JBBAS Pointer to base of
+				; job table
+	MOVEA.L	(A3),A3
+	SF	$F7(A3)
+	MOVE.W	$14(A3),D0	; job status (BASIC)
+	BEQ.S	L02EEA		; not suspended
+	MOVE.B	$13(A3),D0	; priority of BASIC
+	BNE.S	BRECON1
+	MOVE.B	#$20,$13(A3)	; set priority to 32 if it
+				; was set to 0
+BRECON1:
+	CLR.W	$14(A3)		; release job
+	MOVE.L	$0C(A3),D0	; pointer to byte which will
+				; be cleared when job relea
+	BEQ.S	L02EEA
+	MOVEA.L	D0,A3		; clear this byte
+	SF	(A3)
+
+L02EEA:
+	bra	POLL_EXIt
+
+; --------------------------------------------------------------
+FREEZE:
+	CLR.W	KV.ACTKEy(A3)	; reset FREEZE request
+	NOT.B	$33(A6)		; Screen status
+
+	bra	POLL_EXIt
+
+; --------------------------------------------------------------
+CTRL_C:
+	CLR.W	KV.ACTKEy(A3)	; reset CTRL_C request
+
+SWITCHQ:
+	bsr	FNDCHN		; find channel base/ID
+
+	TST.B	SD_CURF(A1)	; queue waiting ?
+	BGE.S	L02F54		; cursor active
+
+	BSR	SD_CURE		; reactivate cursor
+
+L02F54:
+	MOVEA.L	(A2),A2		; next queue
+
+	bsr	FNDCHN		; find channel base/ID
+
+	TST.B	SD_CURF(A1)	; next queue active ?
+	BNE.S	CTRLC0		; yup, continue
+
+	CMPA.L	SV_KEYQ(A6),A2	; Current key Q
+	BNE.S	L02F54		; next Q <> this Q
+
+CTRLC0:
+	move.b	SV_MCSTA(a6),d0
+
+	cmp.l	#$20000,SD_SCRB(a1)
+	bne.s	CTRLC1
+
+	andi.b	#$FF-(1<<MC..SCRN),d0
+	bra.s	CTRLC2
+
+CTRLC1:
+	cmp.l	#$28000,SD_SCRB(a1)
+	bne.s	CTRLC3
+
+	ori.b	#1<<MC..SCRN,d0
+
+CTRLC2:
+	cmp.b	SV_MCSTA(a6),d0
+	beq.s	CTRLC3
+
+	bsr	FLIPIT		; switch screen if necessary
+
+CTRLC3:
+	MOVE.L	A2,SV_KEYQ(A6)	; set current keyboard queue
+	CLR.W	$AA(A6)		; flashing cursor status
+				; (word)
+	MOVEQ	#6,D6
+
+	bra	POLL_EXIt
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SD_CURE:
+;	 movem.l  d0-d1/d3/a0-a2,-(a7)
+
+;	 move.l	 a1,a0
+;	 jsr	 $1B86
+
+;	 movem.l  (a7)+,d0-d1/d3/a0-a2
+;	 rts
+
+;	 movem.l  d0-d1/d3/a1-a2,-(a7)
+
+;	 moveq	 #-1,d3
+;	 moveq	 #SD.CURE,d0
+;	 trap	 #3
+
+;	 movem.l  (a7)+,d0-d1/d3/a1-a2
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; Entry: A2 = pointer to keyboard queue
+
+; Exit:	A0 = Channel ID
+;	A1 = Channel base
+
+FNDCHN:
+	movem.l	d0-d1/a3-a4,-(a7)
+
+	move.l	SV_CHBAS(a6),a0
+	move.l	SV_CHTOP(a6),a4
+	moveq	#0,d0
+
+FNDLUP:
+	move.l	(a0),a1		; channel vars?
+	cmpa.l	a1,a2
+	blt.s	FNDCNT
+
+	move.l	(a1),d1
+	lea	0(a1,d1.w),a3
+	cmpa.l	a3,a2
+	blt.s	FNDDUN
+
+FNDCNT:
+	addq.w	#1,d0
+	addq.l	#4,a0
+	cmp.l	a0,a4
+	bgt.s	FNDLUP
+
+	suba.l	a1,a1
+	moveq	#0,d0
+	bra.s	FNDXIT		; not found!
+
+FNDDUN:
+	swap	d0
+	move.w	CH_TAG(a1),d0
+	swap	d0
+
+FNDXIT:
+	move.l	d0,a0		; channel ID
+
+	movem.l	(a7)+,d0-d1/a3-a4
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Custom LVL7 routine to initialise hardware
+
+MY_LVL7:
+	bsr	INIT_HW
+
+	subq.l	#4,a7
+	movem.l	a3,-(a7)
+	move.l	AV.KEYV,a3
+	move.l	KV.LVL7link(a3),a3
+	move.l	4(a3),4(a7)	; address of next routine
+	movem.l	(a7)+,a3
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  A patch to replace TRAP#1 calls to: MT_IPCOM (d0=$11)
+;  and to add the new routine MT_ASC (d0=$27)
+
+MY_TRP1:
+	bsr	INI_A5A6
+
+	cmp.b	#$11,d0
+	beq	MT_IPCOM
+
+	cmp.b	#$27,d0
+	beq	MT_ASC
+
+MY_TRP1X:
+	movem.l	(a7)+,d7/a5/a6	; restore registers
+
+	subq.l	#4,a7
+	movem.l	a3,-(a7)
+	move.l	AV.KEYV,a3
+	move.l	KV.TRP1link(a3),a3
+	move.l	4(a3),4(a7)	; address of next routine
+	movem.l	(a7)+,a3
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; initialise A5 and A6 prior to performing a TRAP routine
+
+INI_A5A6
+	SUBQ.L	#8,A7
+	MOVE.L	8(A7),-(A7)
+	MOVEM.L	D7/A5/A6,4(A7)
+
+	move.l	a7,d7
+	andi.l	#$FFFF8000,d7
+	move.l	d7,a6		; Calc address of sys vars
+
+	LEA	4(A7),A5 	; A5 points to saved
+				; Registers D7,A5,A6
+	MOVEQ	#$7F,D7
+	AND.L	D7,D0
+	RTS
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  TRAP #1 with D0=$11
+
+MT_IPCOM:
+	cmp.b	#9,(a3)		; is IPC command keyrow ?
+	bne	MY_TRP1X
+
+	MOVEM.L	D4/D6-D7/A0-A1/A3,-(A7)
+
+	MOVE.B	6(A3),D7 	; get row number
+	AND.W	#$7,D7		; only 0..7 are valid
+	BSR	KEYROW
+	CMP.B	#1,D7		; row 1 ? (contains arrows,
+				; space and enter)
+	bne	IPCOM_EX
+	TST.B	D1		; any key pressed ?
+	beq	IPCOM_MO 	; no
+
+	move.b	d1,d0
+	andi.b	#$96,d0
+	beq	IPCOM_EX
+
+	movem.l	d1-d6/a3,-(a7)
+
+	move.l	AV.KEYV,a3    ; address of keyboard vars
+
+	move.w	KV.PTRX(a3),d1
+	move.w	KV.PTRY(a3),d2
+
+	tst.b	KV.QIMIFLG(a3)
+	bne	IPCOM_X
+
+	move.w	KV.PTROLDX(a3),d5
+	move.w	KV.PTROLDY(a3),d6
+
+	btst.b	#4,d0
+	beq.s	IPCOM_1
+	add.w	KV.PTRINCX(a3),d1
+	add.w	KV.PTRINCX(a3),d5
+
+IPCOM_1:
+	btst.b	#1,d0
+	beq.s	IPCOM_2
+	sub.w	KV.PTRINCX(a3),d1
+	sub.w	KV.PTRINCX(a3),d5
+
+IPCOM_2:
+	btst.b	#7,d0
+	beq.s	IPCOM_3
+	add.w	KV.PTRINCY(a3),d2
+	add.w	KV.PTRINCY(a3),d6
+
+IPCOM_3:
+	btst.b	#2,d0
+	beq.s	IPCOM_4
+	sub.w	KV.PTRINCY(a3),d2
+	sub.w	KV.PTRINCY(a3),d6
+
+IPCOM_4:
+	bsr	PTR_CLPX
+	bsr	PTR_CLPY
+
+	move.w	d1,KV.PTRX(a3)
+	move.w	d2,KV.PTRY(a3)
+
+;	 bsr	 PTR_POS
+
+	move.w	d5,d1
+	move.w	d6,d2
+
+	bsr	PTR_CLPX
+	bsr	PTR_CLPY
+
+IPCOM_X:
+	move.w	d1,KV.PTROLDX(a3)
+	move.w	d2,KV.PTROLDY(a3)
+
+	movem.l	(a7)+,d1-d6/a3
+
+	bra.s	IPCOM_EX
+
+IPCOM_MO:
+	BSR	MOUSE
+
+IPCOM_EX:
+	MOVEM.L	(A7)+,D4/D6-D7/A0-A1/A3
+	moveq	#0,d0
+	bra	TRAP1_X
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  KEYROW emulation (row number in D7, -> Columns in D1)
+
+KEYROW:
+	MOVEM.L	A0,-(A7)
+
+	move.l	AV.KEYV,a0    ; address of keyboard vars
+	lea	KV.STORAwkey(a0),a0
+	AND.W	#$0F,D7
+	MOVE.B	0(A0,D7.W),D1
+
+	MOVEM.L	(A7)+,A0
+	RTS
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; read mouse port and generate corresponding keydepression -> D1
+
+MOUSE:
+	MOVEM.L	D0/D2-D5/A0,-(A7)
+
+	move.l	AV.KEYV,a0    ; address of keyboard vars
+
+	clr.b	d1		; preset 'no key'
+
+; --------------------------------------------------------------
+	tst.b	KV.QIMIFLG(a0)
+	bne	MOUSBUTS
+
+	moveq	#0,d5
+	move.w	KV.PTRINCX(a0),d5
+
+	move.w	KV.PTRX(a0),d0
+	sub.w	KV.PTRMINX(a0),d0
+	add.w	KV.PTRERRX(a0),d0
+	ext.l	d0
+	bmi.s	MOUS1
+
+	divu	d5,d0
+	bra.s	MOUS2
+
+MOUS1:
+	neg.w	d0
+	divu	d5,d0
+	addq.w	#1,d0
+	neg.w	d0
+
+MOUS2:
+	move.w	KV.PTROLDX(a0),d4
+	sub.w	KV.PTRMINX(a0),d4
+	ext.l	d4
+	divu	d5,d4
+
+	cmp.w	d4,d0		; more or less ?
+
+	bmi.s	MOUS3
+	beq.s	MOUS4
+
+	ori.b	#$10,d1		; right
+	addq.w	#1,d4
+	bra.s	MOUS4
+
+MOUS3:
+	ori.b	#$02,d1		; left
+	subq.w	#1,d4
+
+MOUS4:
+	mulu	d5,d4
+	add.w	KV.PTRMINX(a0),d4
+	move.w	d4,KV.PTROLDX(a0)
+
+; --------------------------------------------------------------
+	moveq	#0,d6
+	move.w	KV.PTRINCY(a0),d6
+
+	move.w	KV.PTRY(a0),d0
+	sub.w	KV.PTRMINY(a0),d0
+	add.w	KV.PTRERRY(a0),d0
+	ext.l	d0
+	bmi.s	MOUS5
+
+	divu	d6,d0
+	bra.s	MOUS6
+
+MOUS5:
+	neg.w	d0
+	divu	d6,d0
+	addq.w	#1,d0
+	neg.w	d0
+
+MOUS6:
+	move.w	KV.PTROLDY(a0),d4
+	sub.w	KV.PTRMINY(a0),d4
+	ext.l	d4
+	divu	d6,d4
+
+	cmp.w	d4,d0		; more or less ?
+
+	bmi.s	MOUS7
+	beq.s	MOUS8
+
+	ori.b	#$80,d1		; down
+	addq.w	#1,d4
+	bra.s	MOUS8
+
+MOUS7:
+	ori.b	#$04,d1		; up
+	subq.w	#1,d4
+
+MOUS8:
+	mulu	d6,d4
+	add.w	KV.PTRMINY(a0),d4
+	move.w	d4,KV.PTROLDY(a0)
+
+; --------------------------------------------------------------
+	movem.l	d1/d3-d4,-(a7)
+
+	move.w	KV.PTROLDX(a0),d1
+	move.w	KV.PTROLDY(a0),d2
+	move.w	#0,d3
+	move.w	#0,d4
+	bsr	PTR_CLPX
+	bsr	PTR_CLPY
+
+	sub.w	KV.PTRMINX(a0),d1
+	ext.l	d1
+	divu	d5,d1
+	mulu	d5,d1
+	add.w	KV.PTRMINX(a0),d1
+
+	sub.w	KV.PTRMINY(a0),d2
+	ext.l	d2
+	divu	d6,d2
+	mulu	d6,d2
+	add.w	KV.PTRMINY(a0),d2
+
+	move.w	KV.PTROLDX(a0),d3
+	move.w	KV.PTROLDY(a0),d4
+	sub.w	d1,d3
+	sub.w	d2,d4
+	move.w	d1,KV.PTROLDX(a0)
+	move.w	d2,KV.PTROLDY(a0)
+	sub.w	d3,KV.PTRERRX(a0)
+	sub.w	d4,KV.PTRERRY(a0)
+
+	movem.l	(a7)+,d1/d3-d4
+
+; --------------------------------------------------------------
+MOUSBUTS:
+	BTST	#6,CIAA_PRA	; left mouse button
+	BNE.S	MOUS9
+	BSET	#6,D1		; set  space
+MOUS9:
+	MOVE.W	POTGOR,D0
+	AND.W	#$0400,D0	; right mouse button
+	BNE.S	MOUS10
+	BSET	#0,D1		; set enter
+
+MOUS10:
+	MOVEM.L	(A7)+,D0/D2-D5/A0
+	RTS
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; Here  we start with the rawkey conversion table
+; which	is used for the KEYROW function.
+; The organization is Rownumber,Bitnumber in order
+; of the Amiga rawkeys
+
+QLRAWKEY:
+	DC.B	$27,$43,$61,$41,$06,$02,$62,$07
+	DC.B	$60,$50,$65,$55,$35,$15,$FF,$65
+	DC.B	$63,$51,$64,$54,$66,$21,$67,$52
+	DC.B	$57,$45,$30,$20,$FF,$43,$61,$41
+	DC.B	$44,$33,$46,$34,$36,$42,$47,$32
+	DC.B	$40,$37,$27,$10,$FF,$06,$02,$62
+	DC.B	$22,$56,$73,$23,$74,$24,$76,$26
+	DC.B	$76,$22,$75,$FF,$FF,$07,$60,$50
+	DC.B	$16,$11,$53,$10,$10,$13,$11,$FF
+	DC.B	$FF,$FF,$55,$FF,$12,$17,$14,$11
+	DC.B	$01,$03,$04,$00,$05,$01,$03,$04
+	DC.B	$FF,$05,$30,$20,$75,$60,$35,$01
+	DC.B	$70,$70,$31,$71,$72,$72,$71,$71
+	DC.B	$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF
+	DC.B	$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF
+	DC.B	$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF
+
+QLRAWEND:
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  TRAP #1 with D0=$27 (New to QDOS 3.10 on Amiga)
+;  D1=address of new QLASCII table
+;  this is the recommended way to implement foreign
+;  Language keybords tables!
+
+MT_ASC:
+	movem.l	a3,-(a7)
+	move.l	AV.KEYV,a3    ; address of keyboard vars
+	move.l	d1,KV.QLASCtbl(a3)
+	movem.l	(a7)+,a3
+
+	moveq	#0,d0
+
+; --------------------------------------------------------------
+;  exit from TRAP call
+
+TRAP1_X	movem.l	(a7)+,d7/a5/a6	; exit from exception
+	rte
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; conversion table for translating rawkeycode to ASCII code (QL)
+; 1) subtract raw key code from 255 (255-(CIAA_SP))
+; 2) Shift right the result by 1
+; 3) take QLASCII for no shift mode, QLASC_SH for <Shift>,
+;    QLASC_CT for <Ctrl>, QLASC_SC for <Shift>+<Ctrl>
+; 4) read related ASCII code (QL) from table at this offset
+
+QLASCII:
+ DC.B '`','1','2','3','4','5','6','7','8','9','0',156,39,'\',0,'0'
+ DC.B 'q','w','e','r','t','z','u','i','o','p',135,'+',0,'1','2','3'
+ DC.B 'a','s','d','f','g','h','j','k','l',132,128,'#',0,'4','5','6'
+ DC.B '<','y','x','c','v','b','n','m',44,'.','-',0,0,'7','8','9'
+ DC.B ' ',194,9,10,10,27,202,0,0,0,'-',0,208,216,200,192
+ DC.B 232,236,240,244,248,234,238,242,246,250,91,93,'/','*','+',0
+
+QLASC_SH:
+ DC.B '~','!','"',182,'$','%','&','/','(',')','=','?','^','|',0,'0'
+ DC.B 'Q','W','E','R','T','Z','U','I','O','P',167,'*',0,'1','2','3'
+ DC.B 'A','S','D','F','G','H','J','K','L',164,160,'^',0,'4','5','6'
+ DC.B '>','Y','X','C','V','B','N','M',';',':','_',0,0,'7','8','9'
+ DC.B 252,194,253,254,254,127,202,0,0,0,'-',0,212,220,204,196
+ DC.B 234,238,242,246,250,232,236,240,244,248,'{','}','/','*','+',0
+
+QLASC_CT:
+ DC.B 0,145,146,147,148,149,150,151,152,153,144,0,0,188,0,'0'
+ DC.B 17,23,5,18,20,26,21,9,15,16,0,0,0,'1','2','3'
+ DC.B 1,19,4,6,7,8,10,11,12,0,0,0,0,'4','5','6'
+ DC.B 0,25,24,3,22,2,14,13,140,142,141,0,0,'7','8','9'
+ DC.B ' ',194,9,10,10,128,202,0,0,0,'-',0,210,218,202,194
+ DC.B 233,237,241,245,249,235,239,243,247,251,91,93,'/','*','+',0
+
+QLASC_SC:
+ DC.B '`',129,160,131,132,133,0,0,138,136,137,0,0,28,0,'0'
+ DC.B 177,183,165,178,180,186,181,169,175,176,0,0,0,'1','2','3'
+ DC.B 161,179,164,166,167,168,170,171,172,0,0,0,0,'4','5','6'
+ DC.B 0,185,184,163,182,162,174,173,156,158,0,0,0,'7','8','9'
+ DC.B ' ',194,9,10,10,27,202,0,0,0,'-',0,214,222,206,198
+ DC.B 235,239,243,247,251,233,237,241,245,249,91,93,'/','*','+',0
+
+QLASCEND:
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  BASIC extensions specific to AMIGA QDOS
+
+PROC_DEF:
+	dc.w	9
+	dc.w	B_KEYDT-*
+	dc.b	5,'KEYDT'
+	dc.w	B_PTR_POS-*
+	dc.b	7,'PTR_POS'
+	dc.w	B_PTR_INC-*
+	dc.b	7,'PTR_INC'
+	dc.w	B_PTR_LIMITS-*
+	dc.b	10,'PTR_LIMITS',0
+	dc.w	B_QIMI_MOUSE-*
+	dc.b	10,'QIMI_MOUSE',0
+	dc.w	B_CURSOR_MOUSE-*
+	dc.b	12,'CURSOR_MOUSE',0
+	dc.w	0
+
+	dc.w	2
+	dc.w	B_PTR_X-*
+	dc.b	6,'PTR_X%',0
+	dc.w	B_PTR_Y-*
+	dc.b	6,'PTR_Y%',0
+
+	dc.w	0
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  BASIC proc to link in German keymap again, should it become
+;  dislocated for some reason.
+
+B_KEYDT:
+	lea	QLASCII(pc),a0	; address of keyboard table
+	move.l	a0,d1		; in d1
+	moveq	#$27,d0		; MT_ASC (Amiga-QDOS 3.10
+	trap	#1		; and later, only)
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+B_QIMI_MOUSE:
+	SUBA.L	A0,A0
+	MOVEQ	#-1,D3
+	MOVEQ	#$70,D0		;PT_INFO
+	TRAP	#3
+	TST.B	D0
+	BEQ.S	B_QIMI_START
+	LEA.L	NO_PTR(pc),A1
+	MOVE.W	UT.MTEXT,A2
+	JMP	(A2)
+
+NO_PTR	DC.W	30
+	DC.B	'Pointer Interface not present',10
+
+B_QIMI_START:
+	move.l	AV.KEYV,a3    ; address of keyboard vars
+	st	KV.QIMIFLG(a3)
+
+	move.w	#0,KV.PTRMINX(a3) ; reset PTR limits
+	move.w	#0,KV.PTRMINY(a3)
+	move.w	#255,KV.PTRMAXX(a3)
+	move.w	#255,KV.PTRMAXY(a3)
+
+	moveq	#0,d0
+	rts
+
+B_CURSOR_MOUSE:
+	move.l	AV.KEYV,a3    ; address of keyboard vars
+	sf	KV.QIMIFLG(a3)
+	moveq	#0,d0
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+B_PTR_LIMITS:
+	moveq	#0,d2
+	moveq	#0,d3
+	move.w	#255,d4
+	move.w	#255,d5
+	cmp.l	a3,a5
+	beq.s	PTR_LIMITS
+
+	bsr	FETCH_W
+	bne	B_PTRLIMX
+
+	cmp.w	#0,d1
+	blt	RPRT_BP
+
+	move.w	d1,d2		; min X
+
+	bsr	FETCH_W
+	bne	B_PTRLIMX
+
+	cmp.w	#0,d1
+	blt	RPRT_BP
+
+	move.w	d1,d3		; min Y
+
+	bsr	FETCH_W
+	bne	B_PTRLIMX
+
+	cmp.w	#255,d1
+	bgt	RPRT_BP
+
+	move.w	d1,d4		; max X
+
+	bsr	FETCH_W
+	bne	B_PTRLIMX
+
+	cmp.w	#255,d1
+	bgt	RPRT_BP
+
+	move.w	d1,d5		; max Y
+
+	cmp.l	a3,a5
+	bne	RPRT_BP
+
+PTR_LIMITS:
+	cmp.w	d2,d4
+	ble	RPRT_BP
+
+	cmp.w	d3,d5
+	ble	RPRT_BP
+
+	move.l	AV.KEYV,a3    ; address of keyboard vars
+
+	move.w	d2,KV.PTRMINX(a3)
+	move.w	d3,KV.PTRMINY(a3)
+	move.w	d4,KV.PTRMAXX(a3)
+	move.w	d5,KV.PTRMAXY(a3)
+
+	sub.w	d2,d4
+	addq.w	#1,d4
+	lsr.w	#1,d4
+
+	move.w	KV.PTRINCX(a3),d0
+	cmp.w	d4,d0
+	ble.s	B_PTRLIM1
+
+	move.w	d4,KV.PTRINCX(a3)
+
+B_PTRLIM1:
+	sub.w	d3,d5
+	addq.w	#1,d5
+	lsr.w	#1,d5
+
+	move.w	KV.PTRINCY(a3),d0
+	cmp.w	d5,d0
+	ble.s	B_PTRLIM2
+
+	move.w	d4,KV.PTRINCY(a3)
+
+B_PTRLIM2:
+	move.w	KV.PTRX(a3),d1
+	move.w	KV.PTRY(a3),d2
+
+	bsr	PTR_CLPX
+	bsr	PTR_CLPY
+
+	move.w	d1,KV.PTRX(a3)
+	move.w	d2,KV.PTRY(a3)
+
+	bsr	PTR_POS
+
+	move.w	d1,KV.PTROLDX(a3)
+	move.w	d2,KV.PTROLDY(a3)
+
+	move.w	#0,KV.PTRERRX(a3)
+	move.w	#0,KV.PTRERRY(a3)
+
+	moveq	#0,d0
+
+B_PTRLIMX:
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+B_PTR_POS:
+	moveq	#0,d1
+	moveq	#0,d2
+	cmp.l	a3,a5
+	beq.s	B_PTR_POS1
+
+	bsr	FETCH_W
+	bne.s	B_PTR_POSX
+
+	move.w	d1,d2
+
+	bsr	FETCH_W
+	bne.s	B_PTR_POSX
+
+	cmp.l	a3,a5
+	bne	RPRT_BP
+
+	exg	d1,d2
+
+B_PTR_POS1:
+	move.l	AV.KEYV,a3    ; address of keyboard vars
+
+	bsr	PTR_CLPX
+	bsr	PTR_CLPY
+
+	move.w	d1,KV.PTRX(a3)
+	move.w	d2,KV.PTRY(a3)
+
+	bsr	PTR_POS
+
+	move.w	d1,KV.PTROLDX(a3)
+	move.w	d2,KV.PTROLDY(a3)
+
+	move.w	#0,KV.PTRERRX(a3)
+	move.w	#0,KV.PTRERRY(a3)
+
+	moveq	#0,d0
+
+B_PTR_POSX:
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+B_PTR_INC:
+	moveq	#4,d1
+	moveq	#8,d2
+	cmp.l	a3,a5
+	beq.s	B_PTR_INC1
+
+	bsr	FETCH_W
+	bne.s	B_PTR_INCX
+
+	move.w	d1,d2
+
+	bsr	FETCH_W
+	bne.s	B_PTR_INCX
+
+	cmp.l	a3,a5
+	bne	RPRT_BP
+
+	exg	d1,d2
+
+B_PTR_INC1:
+	bsr	PTR_INC
+
+	moveq	#0,d0
+
+B_PTR_INCX:
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+B_PTR_X:
+	cmp.l	a3,a5
+	bne	RPRT_BP
+
+	move.l	AV.KEYV,a3    ; address of keyboard vars
+
+	move.w	KV.PTRX(a3),d1
+
+	bra	RET_W
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+B_PTR_Y:
+	cmp.l	a3,a5
+	bne	RPRT_BP
+
+	move.l	AV.KEYV,a3    ; address of keyboard vars
+
+	move.w	KV.PTRY(a3),d1
+
+	bra	RET_W
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+PTR_POS:
+	movem.l	d1-d3/a4,-(a7)
+
+	add.w	#$2C,d2		; Y offset $2C
+	andi.w	#$1FF,d2 	; Y within range
+	move.w	d2,d3
+	lsl.l	#8,d3
+	lsl.l	#1,d3
+	addi.w	#$A0,d1		; X offset $A0
+	andi.w	#$1FF,d1 	; X within range
+	or.w	d1,d3
+	ror.l	#1,d3
+	swap	d3
+	addi.w	#$10,d2		; Height $10
+	lsl.w	#8,d2
+	roxl.w	#1,d3
+	roxl.w	#1,d3
+	or.w	d2,d3
+
+	move.l	d3,SPRLST
+
+	movem.l	(a7)+,d1-d3/a4
+
+PTR_POSX:
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+PTR_CLPX:
+	movem.l	d5/a3,-(a7)
+
+	move.l	AV.KEYV,a3    ; address of keyboard vars
+
+	move.w	KV.PTRMINX(a3),d5
+	cmp.w	d5,d1
+	blt.s	PTR_CLP1
+
+	move.w	KV.PTRMAXX(a3),d5
+	cmp.w	d5,d1
+	bgt.s	PTR_CLP1
+
+	moveq	#0,d3
+	bra.s	PTR_CLP2
+
+PTR_CLP1:
+	add.w	d1,d3
+	sub.w	d5,d3
+
+	move.w	d5,d1
+
+PTR_CLP2:
+	movem.l	(a7)+,d5/a3
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+PTR_CLPY:
+	movem.l	d5/a3,-(a7)
+
+	move.l	AV.KEYV,a3    ; address of keyboard vars
+
+	move.w	KV.PTRMINY(a3),d5
+	cmp.w	d5,d2
+	blt.s	PTR_CLP3
+
+	move.w	KV.PTRMAXY(a3),d5
+	cmp.w	d5,d2
+	bgt.s	PTR_CLP3
+
+	moveq	#0,d4
+	bra.s	PTR_CLP4
+
+PTR_CLP3:
+	add.w	d2,d4
+	sub.w	d5,d4
+
+	move.w	d5,d2
+
+PTR_CLP4:
+	movem.l	(a7)+,d5/a3
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+PTR_INC:
+	move.l	AV.KEYV,a3    ; address of keyboard vars
+
+	tst.w	d1
+	beq.s	PTR_INCX
+
+	move.w	KV.PTRMAXX(a3),d0
+	sub.w	KV.PTRMINX(a3),d0
+	addq.w	#1,d0
+	lsr.w	#1,d0
+
+	cmp.w	d0,d1
+	bgt.s	PTR_INCX
+
+PTR_INC1:
+	tst.w	d2
+	beq.s	PTR_INCX
+
+	move.w	KV.PTRMAXY(a3),d0
+	sub.w	KV.PTRMINY(a3),d0
+	addq.w	#1,d0
+	lsr.w	#1,d0
+
+	cmp.w	d0,d2
+	bgt.s	PTR_INCX
+
+	move.w	d1,KV.PTRINCX(a3)
+	move.w	d2,KV.PTRINCY(a3)
+
+PTR_INCX:
+	moveq	#0,d0
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; Fetch one Word
+
+FETCH_W:
+	movem.l	a2,-(a7)
+
+	move.w	CA.GTINT,a2
+	bsr.s	GET_ONE
+	bne.s	FETCH_WX
+
+	move.l	a1,BV_RIP(a6)
+	moveq	#0,d1
+	move.w	0(a6,a1.l),d1
+	addq.l	#2,BV_RIP(a6)
+
+FETCH_WX:
+	movem.l	(a7)+,a2
+	tst.l	d0
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  This routine gets one parameter and returns it on the maths
+;  stack, pointed to by (A1).
+;
+; Entry: A2.L   routine to call (i.e. CA.GTINT)
+;	A3.L   pointer to first parameter
+;	A5.L   pointer to last parameter
+;
+; Exit:	A3.L   updated
+;	A5.L   updated
+;	A1.L   updated pointer to top of maths stack
+;	D0.L   error code
+
+GET_ONE:
+	movem.l	d1-d6/a0/a2,-(a7)
+
+	lea	8(a3),a0
+	cmp.l	a0,a5
+	blt.s	GET_ONEBp
+
+	move.l	BV_RIP(a6),a1
+	move.l	a5,-(a7)
+	move.l	a0,a5
+	move.l	a5,-(a7)
+	jsr	(a2)
+	movem.l	(a7)+,a0/a5
+
+	tst.l	d0
+	bne.s	GET_ONEX
+
+	move.l	a0,a3
+	move.l	a1,BV_RIP(a6)
+
+	bra.s	GET_ONEX
+
+GET_ONEBp:
+	moveq	#ERR.BP,d0
+
+GET_ONEX:
+	movem.l	(a7)+,d1-d6/a0/a2
+	tst.l	d0
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Return word d1.w to BASIC
+
+RET_W:
+	move.l	d1,d4
+	moveq.l	#2,d1
+	move.w	BV.CHRIX,a2
+	jsr	(a2)
+	move.l	d4,d1
+
+	move.l	BV_RIP(a6),a1	; Get arith stack pointer
+	subq.l	#2,a1		; room for 2 bytes
+	move.l	a1,BV_RIP(a6)
+	move.w	d1,0(a6,a1.l)	; Put int number on stack
+	moveq.l	#3,d4		; set Integer type
+
+	moveq.l	#ERR.OK,d0	; no errors
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+RPRT_BP:
+	moveq	#ERR.BP,d0
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	END

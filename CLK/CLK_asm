@@ -1,0 +1,549 @@
+	SECTION	CLK
+
+	INCLUDE	'/INC/QDOS_inc'
+	INCLUDE	'/INC/AMIGA_inc'
+	INCLUDE	'/INC/AMIGQDOS_inc'
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; CLK_asm - Clock routines
+;	 - last modified 25/11/96
+
+; All the necessary clock related sources, required to
+; implement QDOS clock routines on the Amiga computer.
+
+; Amiga-QDOS sources by Rainer Kowallik
+;    ...latest changes by Mark J Swift
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  ROM header
+
+BASE:
+	dc.l	$4AFB0001	; ROM recognition code
+	dc.w	0
+	dc.w	ROM_START-BASE
+	dc.b	0,32,'Amiga-QDOS CLOCK routines v1.13',$A
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  start of ROM code
+
+ROM_START:
+	movem.l	d0-d2/a0-a3,-(a7)
+
+; --------------------------------------------------------------
+;  allocate memory for CLK patch variables
+
+	move.l	#CV_LEN,d1
+	moveq	#MT.ALCHP,d0
+	moveq	#0,d2
+	trap	#1
+
+; --------------------------------------------------------------
+;  address of CLK patch variables
+
+	move.l	a0,AV.CLKV
+	move.l	a0,a3
+
+; --------------------------------------------------------------
+;  enter supervisor mode and disable interrupts
+
+	trap	#0
+
+	ori.w	#$0700,sr	; disable interrupts
+
+; --------------------------------------------------------------
+;  link a custom routine into RESET routine
+
+	lea	AV.RSETlink,a1
+	lea	CV.RSETlink(a3),a2
+
+	move.l	(a1),(a2)
+	move.l	a2,(a1)
+
+	lea	MY_RSET(pc),a1
+	move.l	a1,$04(a2)
+
+; --------------------------------------------------------------
+;  link a custom routine into level 7 interrupt server
+
+	lea	AV.LVL7link,a1
+	lea	CV.LVL7link(a3),a2
+
+	move.l	(a1),(a2)
+	move.l	a2,(a1)
+
+	lea	MY_LVL7(pc),a1
+	move.l	a1,$04(a2)
+
+; --------------------------------------------------------------
+;  link a custom routine into Trap #1 exception
+
+	lea	AV.TRP1link,a1
+	lea	CV.TRP1link(a3),a2
+
+	move.l	(a1),(a2)
+	move.l	a2,(a1)
+
+	lea	MY_TRP1(pc),a1
+	move.l	a1,$04(a2)
+
+; --------------------------------------------------------------
+;  Read Amiga clock and set QDOS clock
+
+	bsr.s	INIT_HW
+
+	andi.w	#$D8FF,sr	; enable ints, enter user
+
+	ifd	isA500
+
+	bne.s	ADD_XINT 	; skip if clock exists
+
+	lea	CLK_MESS(pc),a1	; start of message
+	suba.l	a0,a0		; output channel 0
+	move.w	UT.MTEXT,a2
+	jsr	(a2)		; print it
+
+	endif
+; -------------------------------------------------------------
+; link in external interrupt to act on blitter
+
+ADD_XINT:
+	move.l	AV.CLKV,a3
+
+	lea	XINT_SERv(pc),a1	; address of routine
+	lea	CV.XINTLink(a3),a0
+	move.l	a1,4(a0)
+	moveq	#MT.LXINT,d0
+	trap	#1
+
+; --------------------------------------------------------------
+ROM_EXIT:
+	movem.l	(a7)+,d0-d2/a0-a3
+	rts
+
+CLK_MESS:
+	dc.b	0,33,' clock initialised from AmigaDOS',10,0
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  subroutine to read AMIGA clock and initialise QDOS clock
+
+INIT_HW:
+	movem.l	d0-d3/a0/a3,-(a7)
+
+	ifd	isA500
+
+	bsr	INITCLK
+	move.l	d1,d4		; hardware clock into d4
+
+	bclr	#7,CIAA_CRB	; next write is to counter
+	move.b	#0,CIAA_EMSB	; reset event counter
+	move.b	#0,CIAA_EMID
+	move.b	#0,CIAA_ELSB
+
+	clr.b	d1
+
+WAITCLK1:
+	move.b	d1,d2
+	moveq	#-1,d3
+
+WAITCLK2:
+	move.b	CIAA_ELSB,D1	; bits 0-7
+	cmp.b	#75,D0
+	bge.s	INIT_HW1 	; wait about 1.5 secs
+
+	cmp.b	d1,d2
+	bne.s	WAITCLK1
+
+	dbra	d3,WAITCLK2	; don't wait too long
+
+INIT_HW1:
+	bsr	INITCLK		; check clock again
+
+	move.l	d1,d0
+	sub.l	d4,d0
+	ble.s	INIT_HW2 	; no difference, no clock
+
+	subq.l	#3,d0		; difference greater than 3?
+	bcs.s	INIT_HW3 	; nope, clock functional
+
+	endif
+
+INIT_HW2:
+	moveq	#0,d0
+	move.l	PC_CLOCK,d1	; get date from QL h/w
+
+INIT_HW3:
+	move.l	d1,PC_CLOCK	; set date
+
+	move.b	#%00000100,CIAA_ICR ; disable ALARM interrupt
+
+	bclr	#7,CIAA_CRB	; next write is to counter
+	move.b	#0,CIAA_EMSB	; reset event counter
+	move.b	#0,CIAA_EMID
+	move.b	#0,CIAA_ELSB
+
+	bset	#7,CIAA_CRB	; next write is to ALARM
+	move.b	#2,CIAA_EMSB	; alarm every hour - so
+	move.b	#191,CIAA_EMID	; as to update clock from
+	move.b	#32,CIAA_ELSB	; event counter.
+
+	move.b	CIAA_ICR,d7	; read & clear CIA-A ICR
+	or.b	AV.CIAA_ICR,d7
+	bclr	#2,d7		; clear ALARM bit
+	move.b	d7,AV.CIAA_ICR	; store for another program
+
+	move.w	#%0000000000001000,INTREQ ; clear and enable
+	move.w	#%1000000000001000,INTENA ; CIA-A interrupts
+
+	move.b	#%10000100,CIAA_ICR ; enable ALARM interrupt
+
+	ori.b	#%00000100,AV.CIAA_MSK ; take note of alarm
+
+	tst.l	d0
+
+	movem.l	(a7)+,d0-d3/a0/a3
+	rts
+
+; --------------------------------------------------------------
+	ifd	isA500
+
+INITCLK:
+	moveq	#0,d2		; fetch year (i.e. 91)
+	move.b	CLK_YYH,d2
+	andi.b	#$0F,d2
+	mulu.w	#10,d2
+	move.b	CLK_YYL,d3
+	andi.b	#$0F,d3
+	add.b	d3,d2
+
+	cmpi.b	#78,d2		; years before 1978 should
+	bge.s	INITCLK1 	; be read as 20xx i.e 2077
+
+	addi.b	#100,d2
+
+; --------------------------------------------------------------
+INITCLK1:
+	subi.b	#61,d2		; relative to 1961
+	move.l	d2,d0		; make a copy
+	mulu.w	#365,d2
+
+	move.l	d2,d1		; accumulate date in d1
+
+; --------------------------------------------------------------
+	moveq	#0,d2		; fetch month
+	move.b	CLK_MMH,d2
+	andi.b	#$0F,d2
+	mulu.w	#10,d2
+	move.b	CLK_MML,d3
+	andi.b	#$0F,d3
+	add.b	d3,d2
+
+	divu.w	#4,d0		; test for leap year
+
+	swap	d0
+	cmpi.w	#3,d0		; is it a leap year?
+	bne.s	INITCLK2 	; ...no
+
+	cmpi.w	#2,d2		; is it after february?
+	ble.s	INITCLK2 	; ...no
+
+	addq.l	#1,d1		; compensate for extra day
+
+; --------------------------------------------------------------
+INITCLK2:
+	clr.w	d0
+	swap	d0		; clear high 16 bits of d0
+
+	add.l	d0,d1		; add in previous leap years
+
+; --------------------------------------------------------------
+	subq.l	#1,d2		; month number now (0...11)
+	asl.w	#1,d2		; offset into table
+	lea	DAYTBL(pc),a0
+	move.w	0(a0,d2.w),d2	; cumulative total to d2
+
+	add.l	d2,d1		; add it to date
+
+; --------------------------------------------------------------
+	moveq	#0,d2		; fetch day
+	move.b	CLK_DDH,d2
+	andi.b	#$0F,d2
+	mulu.w	#10,d2
+	move.b	CLK_DDL,d3
+	andi.b	#$0F,d3
+	add.b	d3,d2
+
+	subq.w	#1,d2		; compensate for day zero
+
+	add.l	d2,d1		; add it to date
+
+; --------------------------------------------------------------
+	moveq	#24,d0		; convert days to hours
+	bsr	MULT
+
+	moveq	#0,d2		; fetch hour
+	move.b	CLK_HRH,d2
+	andi.b	#$0F,d2
+	mulu.w	#10,d2
+	move.b	CLK_HRL,d3
+	andi.b	#$0F,d3
+	add.b	d3,d2
+
+	add.l	d2,d1		; add it to date
+
+; --------------------------------------------------------------
+	moveq	#60,d0		; convert hours to minutes
+	bsr.s	MULT
+
+	moveq	#0,d2		; fetch minute
+	move.b	CLK_MNH,d2
+	andi.b	#$0F,d2
+	mulu.w	#10,d2
+	move.b	CLK_MNL,d3
+	andi.b	#$0F,d3
+	add.b	d3,d2
+
+	add.l	d2,d1		; add it to date
+
+; --------------------------------------------------------------
+	moveq	#60,d0		; convert minutes to secs
+	bsr.s	MULT
+
+	moveq	#0,d2		; fetch seconds
+	move.b	CLK_SCH,d2
+	andi.b	#$0F,d2
+	mulu.w	#10,d2
+	move.b	CLK_SCL,d3
+	andi.b	#$0F,d3
+	add.b	d3,d2
+
+	add.l	d2,d1		; add it to date
+
+	rts
+
+	endif
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  table of cumulative totals of length of each month
+
+DAYTBL:
+	dc.w	0,31,59,90,120,151,181,212,243,273,304,334
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  multiply 32 bit d1 by 16 bit d0 (assumes no overflow)
+
+MULT:
+	move.l	d1,d2		; make copy
+
+	swap	d1		; multiply high word
+	mulu.w	d0,d1
+	swap	d1
+	clr.w	d1
+
+	mulu.w	d0,d2		; multiply low word
+
+	add.l	d2,d1
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Custom RSET routine to update the clock before a system reset
+
+MY_RSET:
+	bsr	UPDT_CLK
+	move.l	d1,PC_CLOCK	; update QL h/w
+
+	subq.l	#4,a7
+	movem.l	a3,-(a7)
+	move.l	AV.CLKV,a3
+	move.l	CV.RSETlink(a3),a3
+	move.l	4(a3),4(a7)	; address of next routine
+	movem.l	(a7)+,a3
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Custom LVL7 routine to initialise hardware
+
+MY_LVL7:
+	bsr	INIT_HW
+
+	subq.l	#4,a7
+	movem.l	a3,-(a7)
+	move.l	AV.CLKV,a3
+	move.l	CV.LVL7link(a3),a3
+	move.l	4(a3),4(a7)	; address of next routine
+	movem.l	(a7)+,a3
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  A patch to replace TRAP#1 calls to:
+;  MT_RCLCK (d0=$13), MT_SCLCK (d0=$14), MT_ACLCK (d0=$15)
+
+MY_TRP1:
+	bsr.s	INI_A5A6
+
+	cmp.b	#MT.RCLCK,d0
+	beq.s	MT_RCLCK
+
+	cmp.b	#MT.SCLCK,d0
+	beq.s	MT_SCLCK
+
+	cmp.b	#MT.ACLCK,d0
+	beq.s	MT_ACLCK
+
+	movem.l	(a7)+,d7/a5/a6	; restore registers
+
+	subq.l	#4,a7
+	movem.l	a3,-(a7)
+	move.l	AV.CLKV,a3
+	move.l	CV.TRP1link(a3),a3
+	move.l	4(a3),4(a7)	; address of next routine
+	movem.l	(a7)+,a3
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; initialise A5 and A6 prior to performing a TRAP routine
+
+INI_A5A6
+	SUBQ.L	#8,A7
+	MOVE.L	8(A7),-(A7)
+	MOVEM.L	D7/A5/A6,4(A7)
+
+	move.l	a7,d7
+	andi.l	#$FFFF8000,d7
+	move.l	d7,a6		; Calc address of sys vars
+
+	LEA	4(A7),A5 	; A5 points to saved
+				; Registers D7,A5,A6
+	MOVEQ	#$7F,D7
+	AND.L	D7,D0
+	RTS
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  TRAP #1 with D0=$13
+;  implement clock (CIA-A event counter)/50+PC_CLOCK
+
+MT_RCLCK:
+	bsr	UPDT_CLK
+
+	moveq	#0,d0		; no errors
+	bra.s	TRAP1_X
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  TRAP #1 with D0=$14
+
+MT_SCLCK:
+	move.l	d1,PC_CLOCK	; use this as new offset
+
+	bclr	#7,CIAA_CRB	; next write is to counter
+	move.b	#0,CIAA_EMSB	; reset event counter
+	move.b	#0,CIAA_EMID
+	move.b	#0,CIAA_ELSB
+
+	moveq	#0,d0		; no errors
+	bra.s	TRAP1_X
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  TRAP #1 with D0=$15
+
+MT_ACLCK:
+	add.l	d1,PC_CLOCK	; adjust increment offset
+
+	moveq	#0,d0		; no errors
+
+; --------------------------------------------------------------
+;  exit from TRAP call
+
+TRAP1_X	movem.l	(a7)+,d7/a5/a6	; exit from exception
+	rte
+
+; --------------------------------------------------------------
+UPDT_CLK:
+	MOVEQ.L	#0,D1
+	MOVE.B	CIAA_EMSB,D1	; read bits 16-23
+	LSL.L	#8,D1
+	MOVE.B	CIAA_EMID,D1	; bits 8-15
+	LSL.L	#8,D1
+	MOVE.B	CIAA_ELSB,D1	; bits 0-7
+	DIVU	#5000,D1 	; 100 seconds
+	MOVEQ	#0,D0
+	MOVE.W	D1,D0		; get quotient
+	MULU	#100,D0		; get seconds so far
+	SWAP	D1
+	AND.L	#$FFFF,D1	; get remainder
+	DIVU	#50,D1		; get seconds
+
+	;bclr	 #7,CIAA_CRB	 ; next write is to counter
+	;move.b	 #0,CIAA_EMSB
+	;move.b	 #0,CIAA_EMID
+	;move.b	 #0,CIAA_ELSB
+
+	;;swap	  d1		  ; get ticks remaining
+	;;move.b   d1,CIAA_ELSB	  ; restart counter
+	;;swap	  d1
+
+	AND.L	#$FFFF,D1	; get quotient
+	ADD.L	D0,D1		; seconds complete
+	add.l	PC_CLOCK,d1	; add offset for actual day
+				; and time
+	;move.l	 d1,PC_CLOCK	 ; update QL h/w
+
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  external interrupt server
+
+XINT_SERv:
+	movem.l	d7/a0,-(a7)
+
+	move.w	INTENAR,d7	; read interrupt enable reg
+	btst	#3,d7		; branch if ints not on
+	beq	XINT_OTHer
+
+	move.w	INTREQR,d7	; read interrupt request reg
+	btst	#3,d7		; branch if from CIA-A or
+	bne	CIAA_SERv	; expansion ports
+
+; --------------------------------------------------------------
+;  otherwise let another external interrupt server handle it
+
+XINT_OTHer:
+	movem.l	(a7)+,d7/a0
+	rts
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  Interrupt from CIA-A or expansion port
+
+CIAA_SERv:
+	move.b	CIAA_ICR,d7	; read CIA-A ICR
+	or.b	AV.CIAA_ICR,d7
+	move.b	d7,AV.CIAA_ICR	; store for another program
+
+	bclr	#2,d7		; (ALARM bit=1)
+	beq	XINT_OTHer	; no
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;  External interrupt server for acting on event counter alarm
+;  (CIAA ALARM bit=1).
+
+ALRM_SERv:
+	move.b	d7,AV.CIAA_ICR
+
+	and.b	AV.CIAA_MSK,d7	; don't clear INTREQ if
+	bne.s	ALRM_0		; other CIAA ints occured
+
+	move.w	#%0000000000001000,INTREQ ; clear interrupts
+
+; -------------------------------------------------------------
+ALRM_0:
+	bsr	UPDT_CLK 	; update clock
+	move.l	d1,PC_CLOCK	; update QL h/w
+
+; -------------------------------------------------------------
+XINT_EXIt:
+	bra	XINT_OTHer
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	END

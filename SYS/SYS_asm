@@ -1,0 +1,86 @@
+*/beginfile SYS_asm
+; --------------------------------------------------------------
+; SYS_asm - Main system ROM
+;	 - last modified 27/11/96
+
+; These are all the necessary sources required to create a
+; standard QL specific QDOS ROM.
+
+; QDOS-Amiga sources by Rainer Kowallik
+;  ...latest changes by Mark J Swift
+; --------------------------------------------------------------
+
+	SECTION	SYS
+
+REGSTK	EQU	$1FFA0		; register store for trace
+
+MODCODE	EQU	$1FFE8		; address of self modifying
+				; code (TAS and MOVE SR,??)
+				; ...yeuch!
+
+NoTas	equ	1
+;ShoCach  equ	 1
+DoCach	equ	1
+;serdbg	 equ	 1
+
+ORGN:
+	INCLUDE	'/INC/QDOS_inc'
+
+	INCLUDE	'QDOS1_asm'
+
+	INCLUDE	'QDOS2_asm'
+	INCLUDE	'DBUGCODE_asm'
+	INCLUDE	'QDOS3_asm'
+	INCLUDE	'DBUGTBLS_asm'
+
+	INCLUDE	'PROCESSOR_asm'
+
+	INCLUDE	'QDOS4_asm'
+
+	INCLUDE	'ARITH_asm'
+	INCLUDE	'BASIC1_asm'
+	INCLUDE	'PROCS7_asm'
+	INCLUDE	'PROCS2_asm'
+	INCLUDE	'PROCS8_asm'
+	INCLUDE	'PROCS3_asm'
+	INCLUDE	'PROCS5_asm'
+	INCLUDE	'PROCS4_asm'
+	INCLUDE	'PROCS6_asm'
+	INCLUDE	'BASIC2_asm'
+	INCLUDE	'PROCS9_asm'
+	INCLUDE	'BASIC3_asm'
+	INCLUDE	'PROCS1_asm'
+	INCLUDE	'BASIC4_asm'
+	INCLUDE	'PROCS10_asm'
+	INCLUDE	'BASIC5_asm'
+	INCLUDE	'FONT_asm'
+
+	INCLUDE	'BASICFIX_asm'
+; --------------------------------------------------------------
+;*/beginfilling
+
+NOP0B614:
+	DCB.w ($B614-(NOP0B614-ORGN))/2,$4E71
+
+;*/endfilling
+; --------------------------------------------------------------
+	INCLUDE	'QDOSTBLS_asm'
+	INCLUDE	'MOVEP_asm'
+	INCLUDE	'STARTUP_asm'
+
+; --------------------------------------------------------------
+;*/beginfilling
+
+NOP0C000:
+;	 DCB.w ($C000-(NOP0C000-ORGN)-(RLOCEND-RLOCTBL+2))/2,$4E71
+	DCB.W   (49152-48594)/2,$4E71
+
+;*/endfilling
+; --------------------------------------------------------------
+
+	INCLUDE	'RELOC_asm'
+
+	END
+
+; --------------------------------------------------------------
+*/endfile

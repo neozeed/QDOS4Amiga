@@ -1,0 +1,355 @@
+*/beginfile AMIGQDOS_inc
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; AmigaQDOS_inc - Amiga QDOS includes file
+;	       - last modified 14/01/98
+
+; QDOS-Amiga sources by Rainer Kowallik
+;  ...latest changes by Mark J Swift
+
+
+;		 **** ATTENTION! ****
+;
+; $00000-$0BFFF is reserved for the QDOS ROM
+;
+; $0C000-$0FFFF can be used for whatever you wish
+;
+; $10000-$13FFF is reserved for the first bitplane
+; $14000-$17FFF is reserved for the second bitplane
+;
+; $18000-$180FF is reserved for QL I/O
+;
+; $18100-$18167 is reserved for special amiga variables
+;
+; $18168-$18280 is reserved for the QL BEEP sound sample
+;
+; $18280-$185FF is reserved for the main sprite list
+;
+; $18600-$187FF is reserved for main copper list
+;
+; $18800-$1F3FF is reserved for the floppy disk buffer
+;
+; $1F400-$1FFE7 is reserved for Amiga specific ROMs that patch
+;	       the QDOS ROM to work on the Amiga
+;
+; $1FFE8-$1FFFF is reserved for TAS emu self-modifying code
+;
+; $20000-$27FFF is reserved for the QL screen
+;
+; $28000 --->   is reserved for system variables, a possible
+;	       second screen, and the QL tables and work area.
+
+
+AV_IDENT    EQU	'Grub'
+
+; define track sizes for read and write
+
+TLEN	   EQU	12500	; theoretical size
+WLEN	   EQU	TLEN+20	; 20 bytes extra
+RLEN	   EQU	TLEN+1324 ; 1 sector extra
+POLLT	   EQU	200	; time after which motor shuts-off
+
+; address of various bits of hardware
+
+BPLANE1	   EQU	$10000
+BPLANE2	   EQU	$14000
+BPLANE3	   EQU	$12000
+
+SAMPLE	   EQU	$18168
+
+SPRNULL	   EQU	$18280
+SPRLST	   EQU	$18288
+
+COPLST	   EQU	$18600
+
+MFMBUFFER   EQU	$18800	; disk MFM buffer
+MFMBUFEND   EQU	$1F400
+
+** AMGVARS - Variables specific to QDOS-Amiga **
+
+AMGVARS	   EQU	$18100
+
+AV.IDENT    EQU	$18100	; (long)
+AV.RSETlink EQU	$18110
+AV.ILLGlink EQU	$18114
+AV.MAINlink EQU	$18118
+AV.LVL5link EQU	$1811C
+AV.LVL7link EQU	$18120
+AV.TRP0link EQU	$18124
+AV.TRP1link EQU	$18128
+
+AV.CIAA_ICR EQU	$1813A	; (byte)
+AV.CIAB_ICR EQU	$1813B	; (byte)
+AV.CIAA_MSK EQU	$1813C	; (byte)
+AV.CIAB_MSK EQU	$1813D	; (byte)
+
+AV.FLGS1    EQU	$1813E	; (byte)
+			; bit 7 = 1 disable blitr activity
+			;	 0 enable blitr activity
+			;     6 = 1 blitter active
+			;	 0 blitter inactive
+
+AV.MAIV	   EQU	$18140	; (long) Ptr to MAIN vars
+AV.VDUV	   EQU	$18144	; (long) Ptr to VDU vars
+AV.CLKV	   EQU	$18148	; (long) Ptr to CLOCK vars
+AV.KEYV	   EQU	$1814C	; (long) Ptr to KEYB'RD vars
+;AV.PARV     EQU	 $18150	 ; (long) Ptr to PARPORT vars
+AV.SERV	   EQU	$18154	; (long) Ptr to SERPORT vars
+AV.DSKV	   EQU	$18158	; (long) Ptr to disk vars
+AV.SNDV	   EQU	$1815C	; (long) Ptr to sound vars
+
+** Variables local to QDOS ROM patch routines **
+
+MV.RSETlink EQU	$00
+MV.RSET	   EQU	$04	; (long) custom reset routine
+
+MV.LVL7link EQU	$08
+MV.LVL7	   EQU	$0C	; (long) custom CTRL-ALT-7
+
+MV.XINTLink EQU	$10	; (long) address
+			; (long) ptr
+
+MV.RVARS    EQU	$18	; (long) ptr to variables below
+
+MV_LEN	   EQU	$22
+
+** ROM links allocated by MAIN routine **
+
+RV.RSETlink EQU	$00
+RV.RSET	   EQU	$04	; (long) reset routine
+
+RV.ILLGlink EQU	$08
+RV.ILLG	   EQU	$0C	; (long) illegal interrupt
+
+RV.MAINlink EQU	$10
+RV.MAIN	   EQU	$14	; (long) main QL interrupt
+
+RV.LVL5link EQU	$18
+RV.LVL5	   EQU	$1C	; (long) CTRL-ALT-5.
+
+RV.LVL7link EQU	$20
+RV.LVL7	   EQU	$24	; (long) CTRL-ALT-7
+
+RV.TRP0link EQU	$28
+RV.TRP0	   EQU	$2C	; (long)
+
+RV.TRP1link EQU	$30
+RV.TRP1	   EQU	$34	; (long)
+
+RV_LEN	   EQU	$38
+
+** Variables local to VDU routines **
+
+VV.XINTLink EQU	$00	; (long)
+			; (long)
+VV.POLLLink EQU	$08	; (long)
+			; (long)
+
+VV.LVL7link EQU	$10	; (long) address
+VV.LVL7	   EQU	$14	; (long) address
+
+VV.PRIINc   EQU	$18	; (byte)
+VV.PRIBNd   EQU	$19	; (byte)
+VV.PRIACc   EQU	$1A	; (word)
+VV.PRICNt   EQU	$1C	; (word)
+
+VV.STAT	   EQU	$1E	; (byte)
+
+VV.4COL0    EQU	$20	; (word)
+VV.4COL1    EQU	$22	; (word)
+VV.4COL2    EQU	$24	; (word)
+VV.4COL3    EQU	$26	; (word)
+
+VV.8COL0    EQU	$28	; (word)
+VV.8COL1    EQU	$2A	; (word)
+VV.8COL2    EQU	$2C	; (word)
+VV.8COL3    EQU	$2E	; (word)
+
+VV_LEN	   EQU	$30
+
+** Variables local to clock routines **
+
+CV.XINTLink EQU	$00	; (long)
+			; (long)
+CV.POLLLink EQU	$08	; (long) not used
+			; (long)
+
+CV.RSETlink EQU	$10
+CV.RSET	   EQU	$14	; (long) reset routine
+
+CV.LVL7link EQU	$18	; (long) address
+CV.LVL7	   EQU	$1C	; (long) address
+
+CV.TRP1link EQU	$20	; (long) address
+CV.TRP1	   EQU	$24	; (long) address
+
+CV_LEN	   EQU	$28	; (long)
+
+** Define some variables local to keyboard routines **
+
+KV.XINTLink EQU	$00	; (long) address
+			; (long) ptr
+
+KV.POLLLink EQU	$08	; (long) address
+			; (long) ptr
+
+KV.LVL7link EQU	$10	; (long) address
+KV.LVL7	   EQU	$14	; (long) address
+
+KV.TRP1link EQU	$18	; (long) address
+KV.TRP1	   EQU	$1C	; (long) address
+
+KV.SHIFTflg EQU	$20	; (word)
+KV.ACTKEy   EQU	$22	; (word)
+KV.STORAwkey EQU	$24	; (4xlong)
+KV.QLASCtbl EQU $34	; (long) ptr to ASCII table
+
+KV.STOMOuse EQU $38	; (word)
+
+KV.PTROLDX  EQU	$3A	; (word)
+KV.PTROLDY  EQU	$3C	; (word)
+
+KV.PTRX	   EQU	$3E	; (word)
+KV.PTRY	   EQU	$40	; (word)
+
+KV.PTRINCX  EQU	$42	; (word)
+KV.PTRINCY  EQU	$44	; (word)
+
+KV.PTRMINX  EQU	$46	; (word)
+KV.PTRMINY  EQU	$48	; (word)
+KV.PTRMAXX  EQU	$4A	; (word)
+KV.PTRMAXY  EQU	$4C	; (word)
+
+KV.PTRERRX  EQU	$4E	; (word)
+KV.PTRERRY  EQU	$50	; (word)
+
+KV.QIMIFLG  EQU	$52	; (byte)
+
+KV_LEN	   EQU	$54	; length of KV vars
+
+** Define some variables local to serial port routines **
+
+; (necessary for IO.SERIO)
+
+SV.PEND	   EQU	$28	; (long) pending test
+SV.FBYTE    EQU	$2C	; (long) fetch byte
+SV.SBYTE    EQU	$30	; (long) send byte
+SV.RTS	   EQU	$34	; (word) RTS (4E75)
+
+SV.LVL7link EQU	$36	; (long)
+SV.LVL7	   EQU	$3A	; (long) address
+
+SV.TRP1link EQU	$3E	; (long)
+SV.TRP1	   EQU	$42	; (long) address
+
+SV_LEN	   EQU	$46	; length of SER port vars
+
+** Define some variables local to sound routines **
+
+BV.XINTLink EQU	$00	; (long) address
+			; (long) ptr
+
+BV.POLLLink EQU	$08	; (long) address
+			; (long) ptr
+
+BV.LVL7link EQU	$10	; (long)
+BV.LVL7	   EQU	$14	; (long) address
+
+BV.TRP1link EQU	$18	; (long)
+BV.TRP1	   EQU	$1C	; (long) address
+
+BV.DURVAL   EQU	$20	; (long)
+BV.DURCNT   EQU	$24	; (long)
+BV.PITCH1   EQU	$28	; (word)
+BV.PITCH2   EQU	$2A	; (word)
+BV.GRDVAL   EQU	$2C	; (long)
+BV.GRDCNT   EQU	$30	; (long)
+BV.PITCH    EQU	$34	; (word)
+BV.PITINC   EQU	$36	; (word)
+BV.REPVAL   EQU	$38	; (word)
+BV.REPCNT   EQU	$3A	; (word)
+BV.FUZZ	   EQU	$3C	; (word)
+BV.RAND	   EQU	$3E	; (word)
+BV.SEED	   EQU	$40	; (word)
+BV.NOTE	   EQU	$42	; (word)
+BV.BEEP	   EQU	$44	; (word)
+
+BV_LEN	   EQU	$46	; length of BV vars
+
+** Define some variables local to Floppy routines **
+
+FV.POLLLink EQU	$00	; (long) address
+				; (long)
+FV.POLLActiv EQU	$08	; (byte)
+
+FV.XINTLink EQU	$0A	; (long) address
+				; (long)
+
+FV.FLAGS    EQU	$12	; (word)
+
+	   ; bit 14 1=write 0=read
+	   ; bit 13 1=index on write 0=no index on write
+	   ; bit 12 1=index on read  0=no index on read
+	   ; bit 11 1=use SYNC word  0=no SYNC on read
+	   ; bit  5 1=retry on error 0=no retry on error
+
+FV.CNGFLag  EQU	$14	; (byte) disk change status
+FV.RDYFLag  EQU	$15	; (byte) disk ready status
+
+FV.LASTBit  EQU	$16	; (word) last bit in MFM
+
+FV.REQDRive EQU	$18	; (word) required drive
+
+FV.MAXDRive EQU	$1A	; (word) max drive possible
+
+FV.DRVVArs  EQU	$1C	; drive variables here
+
+
+; Define drive variables (there's one of these for every drive)
+
+DV.TYPE	   EQU	$00	; (long)
+
+DV.TIMEOut  EQU	$04	; (word)
+
+DV.SIDE	   EQU	$06	; (word)
+DV.TRACK    EQU	$08	; (word)
+
+DV.SIDE0buff EQU	$0A	; buffer vars for side 0
+DV.SIDE1buff EQU	$0E	; buffer vars for side 1
+
+DV_LEN	   EQU	$12
+
+; end of variables
+
+FV_LEN	   EQU	FV.DRVVArs+4*DV_LEN
+
+
+;	Define ASCII buffer variables
+
+AB.DRIVE    EQU	$00	; (word)
+AB.SIDE	   EQU	$02	; (word)
+AB.TRACK    EQU	$04	; (word)
+
+AB.PENDWflag EQU	$06	; (word)
+AB.BADFLag  EQU	$08	; (word)
+
+AB.LASTBit  EQU	$0A	; (word) last bit in MFM
+
+AB.SCTRPtrs EQU	$0C
+
+AB.SCTR1    EQU	$0C
+AB.SCTR2    EQU	$10
+AB.SCTR3    EQU	$14
+AB.SCTR4    EQU	$18
+AB.SCTR5    EQU	$1C
+AB.SCTR6    EQU	$20
+AB.SCTR7    EQU	$24
+AB.SCTR8    EQU	$28
+AB.SCTR9    EQU	$2C
+
+AB.BUFBEg   EQU	$30
+
+AB.BUFENd   EQU	$1242
+
+; ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+*/endfile
